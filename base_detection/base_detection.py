@@ -12,10 +12,9 @@ class ImageInferencer(Node):
     def __init__(self):
         super().__init__('brota_na_base')
         self.publisher_ = self.create_publisher(Image, 'inferred_image_capiche', 10)
-        self.subscription = self.create_subscription(Image, '/usb_cam/image_raw', self._inferenzzia, 10)
+        self.subscription = self.create_subscription(Image, '/hermit/camera/d435i/color/image_raw', self._inferenzzia, 10)
         self.bridge = CvBridge()
-        # self.model = YOLO('/home/tmp_ws/src/base_detection/include/best.pt')
-        self.model = YOLO('$(find base_detection)/base_detection/best.pt')
+        self.model = YOLO('/ros2_ws/src/base_detection/base_detection/best.pt')
         self.threshold_helmet = 0.9
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(device)
