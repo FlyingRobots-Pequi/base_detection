@@ -16,6 +16,9 @@ setup(
     entry_points={
         'console_scripts': [
             'base_detection = base_detection.base_detection:main',
+            'coordinate_receiver = base_detection.coordinate_receiver:main',
+            'coordinate_processor = base_detection.coordinate_processor:main'
+            'shutown_client = base_detection.shutdown:main' 
         ],
     },
 )
