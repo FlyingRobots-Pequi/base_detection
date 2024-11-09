@@ -5,6 +5,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray
 from cv_bridge import CvBridge
 import numpy as np
+from px4_msgs.msg import VehicleLocalPosition
 from geometry_msgs.msg import Point
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 
