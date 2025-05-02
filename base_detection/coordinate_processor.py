@@ -22,83 +22,12 @@ Dependencies:
     - geometry_msgs
     - std_srvs
 """
-
-import os
-import yaml
+import traceback
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Point, PoseArray, Pose
 import numpy as np
 from sklearn.cluster import KMeans
-from std_srvs.srv import Trigger
-
-# Define the relative path to the configuration file
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config', 'goto_setpoints.yaml')
-
-
-class MyDumper(yaml.SafeDumper):
-    """
-    Custom YAML dumper for formatting setpoint configurations.
-
-    This class extends SafeDumper to provide custom indentation and
-    list representation formatting for the setpoints YAML file.
-    """
-    
-    def increase_indent(self, flow=False, indentless=False):
-        """
-        Override indent increase to ensure consistent formatting.
-
-        Args:
-            flow (bool): Flow style indicator
-            indentless (bool): Indentless style indicator
-
-        Returns:
-            super().increase_indent result
-        """
-        return super(MyDumper, self).increase_indent(flow, indentless=False)
-
-
-def represent_list(dumper, data):
-    """
-    Custom list representation for YAML formatting.
-
-    Determines whether to use block or flow style based on list content.
-    Lists of lists use block style, while simple lists use flow style.
-
-    Args:
-        dumper (yaml.Dumper): YAML dumper instance
-        data (list): List to be formatted
-
-    Returns:
-        yaml.nodes.SequenceNode: Formatted YAML sequence
-    """
-    if all(isinstance(i, list) for i in data):
-        return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=None)
-    return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
-
-
-MyDumper.add_representer(list, represent_list)
-
-
-def add_setpoint_to_file(file_path, new_setpoints):
-    """
-    Add new setpoints to the YAML configuration file.
-
-    Args:
-        file_path (str): Path to the setpoints YAML file
-        new_setpoints (list): List of new setpoints to add
-
-    Note:
-        Setpoints are appended to existing configuration while
-        maintaining the desired YAML formatting style.
-    """
-    with open(file_path, 'r') as file:
-        config = yaml.safe_load(file)
-
-    config['setpoints'].extend(new_setpoints)
-
-    with open(file_path, 'w') as file:
-        yaml.dump(config, file, Dumper=MyDumper, default_flow_style=False)
 
 
 class CoordinateProcessor(Node):
@@ -138,10 +67,6 @@ class CoordinateProcessor(Node):
             'unique_positions',
             10)
 
-        self.shutdown_service = self.create_service(
-            Trigger,
-            'coordinate_processor/shutdown',
-            self.shutdown_service_callback)
 
         self.positions_list = []
         self.unique_positions = []
@@ -157,9 +82,13 @@ class CoordinateProcessor(Node):
         Args:
             msg (geometry_msgs.msg.Point): Delta position message
         """
-        position = [msg.x, msg.y]
-        self.positions_list.append(position)
-        self.get_logger().info(f"Received position: x={msg.x:.3f}, y={msg.y:.3f}")
+        try:
+            position = [msg.x, msg.y]
+            self.positions_list.append(position)
+            self.get_logger().info(f"Received position: x={msg.x:.3f}, y={msg.y:.3f}")
+        except Exception as e:
+            self.get_logger().error(f"Error in delta_position_callback: {e}")
+            traceback.print_exc()
 
     def process_positions(self):
         """
@@ -203,43 +132,9 @@ class CoordinateProcessor(Node):
             self.unique_positions_publisher.publish(pose_array)
             self.get_logger().info(f"Published {len(self.unique_positions)} unique positions.")
 
-            add_setpoint_to_file(CONFIG_PATH, new_setpoints)
-            self.get_logger().info(f"Saved {len(new_setpoints)} setpoints to {CONFIG_PATH}.")
-
         except Exception as e:
             self.get_logger().error(f"Error during clustering: {e}")
-    
-    def destroy_node(self):
-        """
-        Override destroy_node to ensure final position processing.
-
-        Processes any remaining positions before shutting down the node
-        to ensure no detections are lost.
-        """
-        self.get_logger().info("Node is shutting down. Processing positions before exit...")
-        self.process_positions()
-        super().destroy_node()
-
-    def shutdown_service_callback(self, request, response):
-        """
-        Handle shutdown service requests.
-
-        Processes remaining positions and performs graceful shutdown
-        when requested via service call.
-
-        Args:
-            request (std_srvs.srv.Trigger.Request): Service request
-            response (std_srvs.srv.Trigger.Response): Service response
-
-        Returns:
-            std_srvs.srv.Trigger.Response: Service response
-        """
-        self.get_logger().info("Shutdown service called. Preparing to shut down...")
-        self.destroy_node()
-        response.success = True
-        response.message = "CoordinateProcessor is shutting down."
-        return response
-
+            traceback.print_exc()
 
 def main(args=None):
     """

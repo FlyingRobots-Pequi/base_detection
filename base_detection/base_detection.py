@@ -19,14 +19,13 @@ Dependencies:
     - cv_bridge
     - NumPy
 """
-
+import traceback
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray
 from cv_bridge import CvBridge
 from ultralytics import YOLO
-import concurrent.futures
 import cv2
 import numpy as np
 import torch
@@ -60,7 +59,18 @@ class ImageInferencer(Node):
         - CUDA device selection if available
         """
         super().__init__('brota_na_base')
-        self.publisher_ = self.create_publisher(Image, 'inferred_image_capiche', 10)
+        self.get_logger().info("Base Detection Node Initialized")
+        
+        self.publisher_ = self.create_publisher(
+            Image, 
+            'inferred_image_capiche', 
+            10)
+        
+        self.coord_publisher = self.create_publisher(
+            Float32MultiArray, 
+            'detected_coordinates', 
+            10)
+        
         self.subscription = self.create_subscription(
             Image, 
             '/hermit/camera/d435i/color/image_raw', 
@@ -68,9 +78,11 @@ class ImageInferencer(Node):
             10
         )
         self.bridge = CvBridge()
+        
         self.model = YOLO('/ros2_ws/src/base_detection/base_detection/best.pt')
-        self.threshold_helmet = 0.9
+        
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
         self.model.to(device)
         
         # Initialize bounding box coordinates
@@ -79,8 +91,7 @@ class ImageInferencer(Node):
         self.y1 = None
         self.y2 = None
         
-        self.coord_publisher = self.create_publisher(
-            Float32MultiArray, 'detected_coordinates', 10)
+        self.threshold_helmet = 0.9
 
     def _inferenzzia(self, data):
         """
@@ -101,47 +112,55 @@ class ImageInferencer(Node):
             - Saturation: [30, 190]
             - Value: [120, 220]
         """
-        # Convert ROS message to OpenCV image
-        img = self.bridge.imgmsg_to_cv2(data, desired_encoding='bgr8')
-        
-        # Apply HSV color filtering
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array([42, 30, 120]), np.array([135, 190, 220]))
-
-        # Create binary mask result
-        result = np.zeros_like(img)
-        result[mask > 0] = [255, 255, 255]
-
-        # Run YOLO inference
-        results_fly = self.model(result)[0]
-
-        # Process detection results
-        for result_fly in results_fly.boxes.data.tolist():
-            self.x1, self.y1, self.x2, self.y2, score, class_id = result_fly
-
-            if score > self.threshold_helmet:
-                # Draw detection visualization
-                cv2.rectangle(result, 
-                            (int(self.x1), int(self.y1)), 
-                            (int(self.x2), int(self.y2)), 
-                            (0, 255, 0), 4)
-                cv2.putText(result, 
-                           str(score), 
-                           (int(self.x1), int(self.y1)), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 
-                           1.3, 
-                           (0, 255, 0), 
-                           3, 
-                           cv2.LINE_AA)
+        try:
+            # Convert ROS message to OpenCV image
+            img = self.bridge.imgmsg_to_cv2(data, desired_encoding='bgr8')
             
-                # Publish detection coordinates
-                coord_msg = Float32MultiArray()
-                coord_msg.data = [self.x1, self.y1, self.x2, self.y2]
-                self.coord_publisher.publish(coord_msg)
+            # Apply HSV color filtering
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, np.array([42, 30, 120]), np.array([135, 190, 220]))
 
-        # Publish visualization
-        inferred_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
-        self.publisher_.publish(inferred_image_msg)
+            # Create binary mask result
+            result = np.zeros_like(img)
+            result[mask > 0] = [255, 255, 255]
+
+            # Run YOLO inference
+            results_fly = self.model(result)[0]
+
+            # Process detection results
+            for result_fly in results_fly.boxes.data.tolist():
+                self.x1, self.y1, self.x2, self.y2, score, class_id = result_fly
+
+                if score > self.threshold_helmet:
+                    # Draw detection visualization
+                    cv2.rectangle(result, 
+                                (int(self.x1), int(self.y1)), 
+                                (int(self.x2), int(self.y2)), 
+                                (0, 255, 0), 4)
+                    
+                    cv2.circle(result, (int(self.x1+self.x2)/2, int(self.y1+self.y2)/2), 5, (0, 0, 255), -1)
+                    
+                    cv2.putText(result, 
+                            str(score), 
+                            (int(self.x1), int(self.y1)), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 
+                            1.3, 
+                            (0, 255, 0), 
+                            3, 
+                            cv2.LINE_AA)
+                
+                    # Publish detection coordinates
+                    coord_msg = Float32MultiArray()
+                    coord_msg.data = [self.x1, self.y1, self.x2, self.y2]
+                    self.coord_publisher.publish(coord_msg)
+
+            # Publish visualization
+            inferred_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
+            self.publisher_.publish(inferred_image_msg)
+
+        except Exception as e:
+            self.get_logger().error(f"Error in _inferenzzia: {e}")
+            traceback.print_exc()
 
 
 def main(args=None):

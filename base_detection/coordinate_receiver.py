@@ -34,6 +34,14 @@ from geometry_msgs.msg import Point
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 
 
+BIAS_X = 0.1
+BIAS_Y = 0.1
+FX_DEPTH = 925.1
+FY_DEPTH = 925.1
+CX_DEPTH = 639.5
+CY_DEPTH = 359.5
+BASELINE = 0.025
+
 class CoordinateReceiver(Node):
     """
     A ROS2 node for processing and transforming detected base coordinates into real-world positions.
@@ -58,18 +66,15 @@ class CoordinateReceiver(Node):
         failsafe_triggered (bool): Flag indicating if failsafe has been triggered
     """
 
-    def __init__(self, bias_x: float = 0.1, bias_y: float = 0.1, 
-                 fx_depth:float = 925.1, fy_depth:float = 925.1, 
-                 cx_depth:float = 639.5, cy_depth:float = 359.5, 
-                 baseline:float = 0.025):
+    def __init__(self):
         """
         Initialize the CoordinateReceiver node.
 
         Args:
-            bias_x (float): X-axis bias correction value. Defaults to 0.1.
-            bias_y (float): Y-axis bias correction value. Defaults to 0.1.
-            fx_depth (float): Focal length in pixels (X-axis). Defaults to 925.1.
-            fy_depth (float): Focal length in pixels (Y-axis). Defaults to 925.1.
+            bias_x (float): X-axis bias correction value. Defaults to BIAS_X.
+            bias_y (float): Y-axis bias correction value. Defaults to BIAS_Y.
+            fx_depth (float): Focal length in pixels (X-axis). Defaults to FX_DEPTH.
+            fy_depth (float): Focal length in pixels (Y-axis). Defaults to FY_DEPTH.
             cx_depth (float): Principal point X coordinate. Defaults to 639.5.
             cy_depth (float): Principal point Y coordinate. Defaults to 359.5.
             baseline (float): Baseline between RGB and depth cameras. Defaults to 0.025.
@@ -96,19 +101,13 @@ class CoordinateReceiver(Node):
             self.vehicle_local_position_callback, qos_profile)
         
         self.delta_publisher = self.create_publisher(Point, 'delta_position', 10)
+        
 
         # Initialize CvBridge
         self.bridge = CvBridge()
 
         # Initialize attributes
         self.latest_depth = None
-        self.bias_x = bias_x
-        self.bias_y = bias_y
-        self.fx_depth = fx_depth
-        self.fy_depth = fy_depth
-        self.cx_depth = cx_depth
-        self.cy_depth = cy_depth
-        self.baseline = baseline
         self.failsafe_triggered = False
 
     def depth_callback(self, msg):
@@ -143,14 +142,17 @@ class CoordinateReceiver(Node):
         Note:
             Triggers failsafe if altitude exceeds -0.13m (NED frame)
         """
-        self.current_altitude = msg.z
-        self.current_x = msg.x
-        self.current_y = msg.y
-        self.current_yaw = msg.heading
+        try:
+            self.current_altitude = msg.z
+            self.current_x = msg.x
+            self.current_y = msg.y
+            self.current_yaw = msg.heading
 
-        if self.current_altitude > -0.13:
-            self.get_logger().error("Altitude exceeds safe threshold! Engaging failsafe.")
-            self.failsafe_triggered = True
+            if self.current_altitude > -0.13:
+                self.get_logger().error("Altitude exceeds safe threshold! Engaging failsafe.")
+                self.failsafe_triggered = True
+        except Exception as e:
+            self.get_logger().error(f"Error in vehicle_local_position_callback: {e}")
 
     def listener_callback(self, msg):
         """
@@ -211,13 +213,13 @@ class CoordinateReceiver(Node):
                     self.get_logger().info(f"Depth at midpoint: {z:.3f} meters")
 
                     # Calculate real-world coordinates
-                    delta_x = (mid_x_depth - self.cx_depth) * z / self.fx_depth
-                    delta_y = (mid_y_depth - self.cy_depth) * z / self.fy_depth
+                    delta_x = (mid_x_depth - CX_DEPTH) * z / FX_DEPTH
+                    delta_y = (mid_y_depth - CY_DEPTH) * z / FY_DEPTH
 
                     # Apply corrections
-                    delta_x += self.baseline
-                    delta_x -= self.bias_x 
-                    delta_y -= self.bias_y 
+                    delta_x += BASELINE
+                    delta_x -= BIAS_X 
+                    delta_y -= BIAS_Y 
 
                     self.get_logger().info(f"Delta real x: {delta_x:.3f} meters, Delta real y: {delta_y:.3f} meters")
                     
