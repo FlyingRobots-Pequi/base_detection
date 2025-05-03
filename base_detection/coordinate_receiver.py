@@ -23,6 +23,7 @@ Dependencies:
     - Geometry Messages
 """
 
+import traceback
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -89,24 +90,32 @@ class CoordinateReceiver(Node):
             depth=1
         )
         
-        # Create subscriptions
         self.subscription = self.create_subscription(
-            Float32MultiArray, 'detected_coordinates', self.listener_callback, 10)
+            Float32MultiArray, 
+            'detected_coordinates', 
+            self.listener_callback, 
+            10)
         
         self.depth_subscription = self.create_subscription(
-            Image, '/hermit/camera/d435i/depth/image_rect_raw', self.depth_callback, 10)
+            Image, 
+            '/hermit/camera/d435i/depth/image_rect_raw', 
+            self.depth_callback, 
+            10)
         
         self.local_position_sub = self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position', 
-            self.vehicle_local_position_callback, qos_profile)
+            VehicleLocalPosition, 
+            '/fmu/out/vehicle_local_position', 
+            self.vehicle_local_position_callback, 
+            qos_profile)
         
-        self.delta_publisher = self.create_publisher(Point, 'delta_position', 10)
+        self.delta_publisher = self.create_publisher(
+            Point, 
+            'delta_position', 
+            10)
         
 
-        # Initialize CvBridge
         self.bridge = CvBridge()
 
-        # Initialize attributes
         self.latest_depth = None
         self.failsafe_triggered = False
 
@@ -128,6 +137,7 @@ class CoordinateReceiver(Node):
             self.latest_depth = depth_image.astype(np.float32)
         except Exception as e:
             self.get_logger().error(f"Error in depth_callback: {e}")
+            traceback.print_exc()
     
     def vehicle_local_position_callback(self, msg):
         """
@@ -153,6 +163,7 @@ class CoordinateReceiver(Node):
                 self.failsafe_triggered = True
         except Exception as e:
             self.get_logger().error(f"Error in vehicle_local_position_callback: {e}")
+            traceback.print_exc()
 
     def listener_callback(self, msg):
         """
@@ -185,15 +196,12 @@ class CoordinateReceiver(Node):
             # Calculate bounding box dimensions
             bbox_width = abs(x2 - x1)
             bbox_height = abs(y2 - y1)
-            self.get_logger().info(f"Bounding box width: {bbox_width}, height: {bbox_height}")
 
             # Validate bounding box shape
             aspect_ratio = bbox_width / bbox_height if bbox_height != 0 else float('inf')
             tolerance = 0.1
             if abs(aspect_ratio - 1) <= tolerance:
-                self.get_logger().info("Bounding box is approximately square.")
 
-                # Calculate midpoint
                 mid_x_rgb = int((x1 + x2) / 2)
                 mid_y_rgb = int((y1 + y2) / 2)
                 self.get_logger().info(f"Midpoint of the bounding box (RGB): ({mid_x_rgb}, {mid_y_rgb})")
@@ -210,11 +218,9 @@ class CoordinateReceiver(Node):
 
                     # Convert depth to meters
                     z = depth_value / 1000.0
-                    self.get_logger().info(f"Depth at midpoint: {z:.3f} meters")
 
-                    # Calculate real-world coordinates
-                    delta_x = (mid_x_depth - CX_DEPTH) * z / FX_DEPTH
-                    delta_y = (mid_y_depth - CY_DEPTH) * z / FY_DEPTH
+                    delta_x = (mid_x_depth - CX_DEPTH) * z / FX_DEPTH if FX_DEPTH != 0 else 0
+                    delta_y = (mid_y_depth - CY_DEPTH) * z / FY_DEPTH if FY_DEPTH != 0 else 0
 
                     # Apply corrections
                     delta_x += BASELINE
@@ -236,8 +242,10 @@ class CoordinateReceiver(Node):
                 self.get_logger().info("Bounding box is not approximately square. Ignoring this detection.")
         except ValueError as ve:
             self.get_logger().error(f"Value error in listener_callback: {ve}")
+            traceback.print_exc()
         except Exception as e:
             self.get_logger().error(f"Unexpected error in listener_callback: {e}")
+            traceback.print_exc()
 
 
 def main(args=None):

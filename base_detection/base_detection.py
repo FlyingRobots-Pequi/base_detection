@@ -113,7 +113,6 @@ class ImageInferencer(Node):
             - Value: [120, 220]
         """
         try:
-            # Convert ROS message to OpenCV image
             img = self.bridge.imgmsg_to_cv2(data, desired_encoding='bgr8')
             
             # Apply HSV color filtering
@@ -154,7 +153,6 @@ class ImageInferencer(Node):
                     coord_msg.data = [self.x1, self.y1, self.x2, self.y2]
                     self.coord_publisher.publish(coord_msg)
 
-            # Publish visualization
             inferred_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
             self.publisher_.publish(inferred_image_msg)
 
