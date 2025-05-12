@@ -154,6 +154,28 @@ flowchart TD
 
 ## Setup and Installation
 
+Se necessario, acesse o PC da Telma primeiro:
+
+ssh flying@200.137.220.91 -p 22454
+
+**jetson fica sempre da pqmec-galaxy**
+```bash
+ssh -XC orin2@172.16.2.233
+senha: orin2
+
+cd bringup 
+docker compose up (as vezes vc usa o do tmp)
+
+ros2 topic list
+
+rviz
+
+docker exec -it base_detection_container bash
+
+ls
+cd ros2_ws/src/base_detection
+ros2 topic list
+```
 1. **Prerequisites**
 
    ```bash
