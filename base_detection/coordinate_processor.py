@@ -28,7 +28,10 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point, PoseArray, Pose
 import numpy as np
 from sklearn.cluster import KMeans
-
+from base_detection.variables import (
+    DETECTED_COORDINATES_TOPIC,
+    UNIQUE_POSITIONS_TOPIC
+)
 
 class CoordinateProcessor(Node):
     """
@@ -58,13 +61,13 @@ class CoordinateProcessor(Node):
 
         self.subscription = self.create_subscription(
             Point,
-            'delta_position',
+            DETECTED_COORDINATES_TOPIC,
             self.delta_position_callback,
             10)
 
         self.unique_positions_publisher = self.create_publisher(
             PoseArray,
-            'unique_positions',
+            UNIQUE_POSITIONS_TOPIC,
             10)
 
 

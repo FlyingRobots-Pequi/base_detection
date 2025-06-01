@@ -33,15 +33,20 @@ import numpy as np
 from px4_msgs.msg import VehicleLocalPosition
 from geometry_msgs.msg import Point
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
+from base_detection.variables import (
+    DEPTH_IMAGE_TOPIC,
+    VEHICLE_LOCAL_POSITION_TOPIC,
+    DETECTED_COORDINATES_TOPIC,
+    DELTA_POSITION_TOPIC,
+    D455_BASELINE as BASELINE,
+    D455_BIAS_X as BIAS_X,
+    D455_BIAS_Y as BIAS_Y,
+    D455_FX_DEPTH as FX_DEPTH,
+    D455_FY_DEPTH as FY_DEPTH,
+    D455_CX_DEPTH as CX_DEPTH,
+    D455_CY_DEPTH as CY_DEPTH
+)
 
-
-BIAS_X = 0.1
-BIAS_Y = 0.1
-FX_DEPTH = 925.1
-FY_DEPTH = 925.1
-CX_DEPTH = 639.5
-CY_DEPTH = 359.5
-BASELINE = 0.025
 
 class CoordinateReceiver(Node):
     """
@@ -92,25 +97,25 @@ class CoordinateReceiver(Node):
         
         self.subscription = self.create_subscription(
             Float32MultiArray, 
-            'detected_coordinates', 
+            DETECTED_COORDINATES_TOPIC, 
             self.listener_callback, 
             10)
         
         self.depth_subscription = self.create_subscription(
             Image, 
-            '/hermit/camera/d435i/depth/image_rect_raw', 
+            DEPTH_IMAGE_TOPIC, 
             self.depth_callback, 
             10)
         
         self.local_position_sub = self.create_subscription(
             VehicleLocalPosition, 
-            '/fmu/out/vehicle_local_position', 
+            VEHICLE_LOCAL_POSITION_TOPIC, 
             self.vehicle_local_position_callback, 
             qos_profile)
         
         self.delta_publisher = self.create_publisher(
             Point, 
-            'delta_position', 
+            DELTA_POSITION_TOPIC, 
             10)
         
 

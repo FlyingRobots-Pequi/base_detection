@@ -29,6 +29,13 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import torch
+from base_detection.variables import (
+    COLOR_IMAGE_TOPIC, 
+    INFERRED_IMAGE_TOPIC, 
+    DETECTED_COORDINATES_TOPIC, 
+    COLOR_IMAGE_TOPIC2
+)
+
 
 class ImageInferencer(Node):
     """
@@ -63,23 +70,22 @@ class ImageInferencer(Node):
         
         self.publisher_ = self.create_publisher(
             Image, 
-            'inferred_image_capiche', 
+            INFERRED_IMAGE_TOPIC, 
             10)
         
         self.coord_publisher = self.create_publisher(
             Float32MultiArray, 
-            'detected_coordinates', 
+            DETECTED_COORDINATES_TOPIC, 
             10)
-        
+    
         self.subscription = self.create_subscription(
             Image, 
-            '/hermit/camera/d435i/color/image_raw', 
+            COLOR_IMAGE_TOPIC2, 
             self._inferenzzia, 
             10
         )
         self.bridge = CvBridge()
-        
-        self.model = YOLO('/ros2_ws/src/base_detection/base_detection/best.pt')
+        self.model = YOLO('/root/ros2_ws/src/base_detection/base_detection/best.pt')
         
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
