@@ -19,7 +19,7 @@ Dependencies:
     - cv_bridge
     - NumPy
 """
-import traceback
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -29,11 +29,12 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import torch
-from base_detection.variables import (
-    COLOR_IMAGE_TOPIC, 
-    INFERRED_IMAGE_TOPIC, 
-    DETECTED_COORDINATES_TOPIC, 
-    COLOR_IMAGE_TOPIC2
+from base_detection.configs import (
+    COLOR_IMAGE_TOPIC,
+    INFERRED_IMAGE_TOPIC,
+    DETECTED_COORDINATES_TOPIC,
+    COLOR_IMAGE_TOPIC2,
+    log_exception,
 )
 
 
@@ -65,40 +66,34 @@ class ImageInferencer(Node):
         - YOLO model loading and configuration
         - CUDA device selection if available
         """
-        super().__init__('brota_na_base')
+        super().__init__("brota_na_base")
         self.get_logger().info("Base Detection Node Initialized")
-        
-        self.publisher_ = self.create_publisher(
-            Image, 
-            INFERRED_IMAGE_TOPIC, 
-            10)
-        
+
+        self.publisher_ = self.create_publisher(Image, INFERRED_IMAGE_TOPIC, 10)
+
         self.coord_publisher = self.create_publisher(
-            Float32MultiArray, 
-            DETECTED_COORDINATES_TOPIC, 
-            10)
-    
+            Float32MultiArray, DETECTED_COORDINATES_TOPIC, 10
+        )
+
         self.subscription = self.create_subscription(
-            Image, 
-            COLOR_IMAGE_TOPIC2, 
-            self._inferenzzia, 
-            10
+            Image, COLOR_IMAGE_TOPIC2, self._inferenzzia, 10
         )
         self.bridge = CvBridge()
-        self.model = YOLO('/root/ros2_ws/src/base_detection/base_detection/best.pt')
-        
+        self.model = YOLO("/root/ros2_ws/src/base_detection/base_detection/best.pt")
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+
         self.model.to(device)
-        
+
         # Initialize bounding box coordinates
         self.x1 = None
         self.x2 = None
         self.y1 = None
         self.y2 = None
-        
+
         self.threshold_helmet = 0.9
 
+    @log_exception
     def _inferenzzia(self, data):
         """
         Process incoming RGB images and perform base detection.
@@ -118,53 +113,59 @@ class ImageInferencer(Node):
             - Saturation: [30, 190]
             - Value: [120, 220]
         """
-        try:
-            img = self.bridge.imgmsg_to_cv2(data, desired_encoding='bgr8')
-            
-            # Apply HSV color filtering
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(hsv, np.array([42, 30, 120]), np.array([135, 190, 220]))
+        img = self.bridge.imgmsg_to_cv2(data, desired_encoding="bgr8")
 
-            # Create binary mask result
-            result = np.zeros_like(img)
-            result[mask > 0] = [255, 255, 255]
+        # Apply HSV color filtering
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, np.array([42, 30, 120]), np.array([135, 190, 220]))
 
-            # Run YOLO inference
-            results_fly = self.model(result)[0]
+        # Create binary mask result
+        result = np.zeros_like(img)
+        result[mask > 0] = [255, 255, 255]
 
-            # Process detection results
-            for result_fly in results_fly.boxes.data.tolist():
-                self.x1, self.y1, self.x2, self.y2, score, class_id = result_fly
+        # Run YOLO inference
+        results_fly = self.model(result)[0]
 
-                if score > self.threshold_helmet:
-                    # Draw detection visualization
-                    cv2.rectangle(result, 
-                                (int(self.x1), int(self.y1)), 
-                                (int(self.x2), int(self.y2)), 
-                                (0, 255, 0), 4)
-                    
-                    cv2.circle(result, (int((self.x1 + self.x2) / 2), int((self.y1 + self.y2) / 2)), 5, (0, 0, 255), -1)
-                    
-                    cv2.putText(result, 
-                            str(score), 
-                            (int(self.x1), int(self.y1)), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 
-                            1.3, 
-                            (0, 255, 0), 
-                            3, 
-                            cv2.LINE_AA)
-                
-                    # Publish detection coordinates
-                    coord_msg = Float32MultiArray()
-                    coord_msg.data = [self.x1, self.y1, self.x2, self.y2]
-                    self.coord_publisher.publish(coord_msg)
+        # Process detection results
+        for result_fly in results_fly.boxes.data.tolist():
+            self.x1, self.y1, self.x2, self.y2, score, class_id = result_fly
 
-            inferred_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
-            self.publisher_.publish(inferred_image_msg)
+            if score > self.threshold_helmet:
+                # Draw detection visualization
+                cv2.rectangle(
+                    result,
+                    (int(self.x1), int(self.y1)),
+                    (int(self.x2), int(self.y2)),
+                    (0, 255, 0),
+                    4,
+                )
 
-        except Exception as e:
-            self.get_logger().error(f"Error in _inferenzzia: {e}")
-            traceback.print_exc()
+                cv2.circle(
+                    result,
+                    (int((self.x1 + self.x2) / 2), int((self.y1 + self.y2) / 2)),
+                    5,
+                    (0, 0, 255),
+                    -1,
+                )
+
+                cv2.putText(
+                    result,
+                    f"{score:.4f}",
+                    (int(self.x1), int(self.y1)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.3,
+                    (0, 255, 0),
+                    3,
+                    cv2.LINE_AA,
+                )
+
+                # Publish detection coordinates
+                coord_msg = Float32MultiArray()
+                coord_msg.data = [self.x1, self.y1, self.x2, self.y2]
+                self.coord_publisher.publish(coord_msg)
+
+        inferred_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
+        self.publisher_.publish(inferred_image_msg)
 
 
 def main(args=None):
@@ -186,5 +187,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -33,7 +33,7 @@ import numpy as np
 from px4_msgs.msg import VehicleLocalPosition
 from geometry_msgs.msg import Point
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from base_detection.variables import (
+from base_detection.configs import (
     DEPTH_IMAGE_TOPIC,
     VEHICLE_LOCAL_POSITION_TOPIC,
     DETECTED_COORDINATES_TOPIC,
@@ -44,7 +44,8 @@ from base_detection.variables import (
     D455_FX_DEPTH as FX_DEPTH,
     D455_FY_DEPTH as FY_DEPTH,
     D455_CX_DEPTH as CX_DEPTH,
-    D455_CY_DEPTH as CY_DEPTH
+    D455_CY_DEPTH as CY_DEPTH,
+    log_exception,
 )
 
 
@@ -85,45 +86,39 @@ class CoordinateReceiver(Node):
             cy_depth (float): Principal point Y coordinate. Defaults to 359.5.
             baseline (float): Baseline between RGB and depth cameras. Defaults to 0.025.
         """
-        super().__init__('coordinate_receiver')
-        
+        super().__init__("coordinate_receiver")
+
         # QoS Profile Definition
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1
+            depth=1,
         )
-        
+
         self.subscription = self.create_subscription(
-            Float32MultiArray, 
-            DETECTED_COORDINATES_TOPIC, 
-            self.listener_callback, 
-            10)
-        
+            Float32MultiArray, DETECTED_COORDINATES_TOPIC, self.listener_callback, 10
+        )
+
         self.depth_subscription = self.create_subscription(
-            Image, 
-            DEPTH_IMAGE_TOPIC, 
-            self.depth_callback, 
-            10)
-        
+            Image, DEPTH_IMAGE_TOPIC, self.depth_callback, 10
+        )
+
         self.local_position_sub = self.create_subscription(
-            VehicleLocalPosition, 
-            VEHICLE_LOCAL_POSITION_TOPIC, 
-            self.vehicle_local_position_callback, 
-            qos_profile)
-        
-        self.delta_publisher = self.create_publisher(
-            Point, 
-            DELTA_POSITION_TOPIC, 
-            10)
-        
+            VehicleLocalPosition,
+            VEHICLE_LOCAL_POSITION_TOPIC,
+            self.vehicle_local_position_callback,
+            qos_profile,
+        )
+
+        self.delta_publisher = self.create_publisher(Point, DELTA_POSITION_TOPIC, 10)
 
         self.bridge = CvBridge()
 
         self.latest_depth = None
         self.failsafe_triggered = False
 
+    @log_exception
     def depth_callback(self, msg):
         """
         Process incoming depth image messages.
@@ -137,13 +132,10 @@ class CoordinateReceiver(Node):
         Note:
             Depth values are stored in millimeters and converted to meters during processing
         """
-        try:
-            depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-            self.latest_depth = depth_image.astype(np.float32)
-        except Exception as e:
-            self.get_logger().error(f"Error in depth_callback: {e}")
-            traceback.print_exc()
-    
+        depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+        self.latest_depth = depth_image.astype(np.float32)
+
+    @log_exception
     def vehicle_local_position_callback(self, msg):
         """
         Process vehicle position updates and check safety conditions.
@@ -157,16 +149,12 @@ class CoordinateReceiver(Node):
         Note:
             Triggers failsafe if altitude exceeds -0.13m (NED frame)
         """
-        try:
-            self.current_altitude = msg.z
-            self.current_x = msg.x
-            self.current_y = msg.y
-            self.current_yaw = msg.heading
+        self.current_altitude = msg.z
+        self.current_x = msg.x
+        self.current_y = msg.y
+        self.current_yaw = msg.heading
 
-        except Exception as e:
-            self.get_logger().error(f"Error in vehicle_local_position_callback: {e}")
-            traceback.print_exc()
-
+    @log_exception
     def listener_callback(self, msg):
         """
         Process detected base coordinates and calculate real-world positions.
@@ -193,60 +181,68 @@ class CoordinateReceiver(Node):
         try:
             # Unpack coordinates
             x1, y1, x2, y2 = msg.data
-            self.get_logger().info(f"Received coordinates: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
+            self.get_logger().info(
+                f"Received coordinates: ({x1}, {y1}), ({x2}, {y2})"
+            )
 
             # Calculate bounding box dimensions
             bbox_width = abs(x2 - x1)
             bbox_height = abs(y2 - y1)
 
             # Validate bounding box shape
-            aspect_ratio = bbox_width / bbox_height if bbox_height != 0 else float('inf')
-            tolerance = 0.1
+            aspect_ratio = (
+                bbox_width / bbox_height if bbox_height != 0 else float("inf")
+            )
+            tolerance = 0.15
             if abs(aspect_ratio - 1) <= tolerance:
 
+                # cálculo do centro da bounding‐box
                 mid_x_rgb = int((x1 + x2) / 2)
                 mid_y_rgb = int((y1 + y2) / 2)
-                self.get_logger().info(f"Midpoint of the bounding box (RGB): ({mid_x_rgb}, {mid_y_rgb})")
 
+                # busca depth_value, usando valor padrão se latest_depth for None ou inválido
                 if self.latest_depth is not None:
-                    mid_x_depth = mid_x_rgb
-                    mid_y_depth = mid_y_rgb
-
-                    # Get and validate depth value
-                    depth_value = self.latest_depth[mid_y_depth, mid_x_depth]
-                    if np.isnan(depth_value) or depth_value <= 0:
-                        self.get_logger().warning("Invalid depth value encountered.")
-                        return
-
-                    # Convert depth to meters
-                    z = depth_value / 1000.0
-
-                    delta_x = (mid_x_depth - CX_DEPTH) * z / FX_DEPTH if FX_DEPTH != 0 else 0
-                    delta_y = (mid_y_depth - CY_DEPTH) * z / FY_DEPTH if FY_DEPTH != 0 else 0
-
-                    # Apply corrections
-                    delta_x += BASELINE
-                    delta_x -= BIAS_X 
-                    delta_y -= BIAS_Y 
-
-                    self.get_logger().info(f"Delta real x: {delta_x:.3f} meters, Delta real y: {delta_y:.3f} meters")
-                    
-                    # Publish results
-                    delta_point = Point()
-                    delta_point.x = delta_x
-                    delta_point.y = delta_y
-                    delta_point.z = 0.0
-                    self.delta_publisher.publish(delta_point)
-                    
+                    raw = self.latest_depth[mid_y_rgb, mid_x_rgb]
+                    if np.isnan(raw) or raw <= 0:
+                        self.get_logger().warning(
+                            "Invalid depth value encountered. Using default for simulation."
+                        )
+                        depth_value = np.float32(-0.4)
+                    else:
+                        depth_value = raw
                 else:
-                    self.get_logger().warning("No depth data available.")
+                    self.get_logger().warning(
+                        "No depth data available. Using default for simulation."
+                    )
+                    depth_value = np.float32(-0.4)
+
+                # conversão para metros
+                z = depth_value / 1000.0
+
+                # cálculo de delta_x e delta_y
+                delta_x = ((mid_x_rgb - CX_DEPTH) * z / FX_DEPTH) if FX_DEPTH != 0 else 0
+                delta_y = ((mid_y_rgb - CY_DEPTH) * z / FY_DEPTH) if FY_DEPTH != 0 else 0
+
+                # aplica correções de baseline e bias
+                delta_x += BASELINE - BIAS_X
+                delta_y -= BIAS_Y
+
+                self.get_logger().info(
+                    f"Delta real x,y: ({delta_x:.3f}, {delta_y:.3f}) meters"
+                )
+
+                # publica resultado
+                delta_point = Point()
+                delta_point.x = delta_x
+                delta_point.y = delta_y
+                delta_point.z = 0.0
+                self.delta_publisher.publish(delta_point)
             else:
-                self.get_logger().info("Bounding box is not approximately square. Ignoring this detection.")
+                self.get_logger().info(
+                    "Bounding box is not approximately square. Ignoring this detection."
+                )
         except ValueError as ve:
             self.get_logger().error(f"Value error in listener_callback: {ve}")
-            traceback.print_exc()
-        except Exception as e:
-            self.get_logger().error(f"Unexpected error in listener_callback: {e}")
             traceback.print_exc()
 
 
@@ -269,5 +265,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

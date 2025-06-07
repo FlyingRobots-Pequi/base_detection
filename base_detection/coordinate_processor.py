@@ -22,16 +22,18 @@ Dependencies:
     - geometry_msgs
     - std_srvs
 """
-import traceback
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Point, PoseArray, Pose
 import numpy as np
 from sklearn.cluster import KMeans
-from base_detection.variables import (
-    DETECTED_COORDINATES_TOPIC,
-    UNIQUE_POSITIONS_TOPIC
+from base_detection.configs import (
+    DELTA_POSITION_TOPIC,
+    UNIQUE_POSITIONS_TOPIC,
+    NUM_BASES,
+    log_exception,
 )
+
 
 class CoordinateProcessor(Node):
     """
@@ -57,24 +59,21 @@ class CoordinateProcessor(Node):
         - Shutdown service
         - Data structures for position processing
         """
-        super().__init__('coordinate_processor')
+        super().__init__("coordinate_processor")
 
         self.subscription = self.create_subscription(
-            Point,
-            DETECTED_COORDINATES_TOPIC,
-            self.delta_position_callback,
-            10)
+            Point, DELTA_POSITION_TOPIC, self.delta_position_callback, 10
+        )
 
         self.unique_positions_publisher = self.create_publisher(
-            PoseArray,
-            UNIQUE_POSITIONS_TOPIC,
-            10)
-
+            PoseArray, UNIQUE_POSITIONS_TOPIC, 10
+        )
 
         self.positions_list = []
         self.unique_positions = []
-        self.expected_bases = 3
+        self.expected_bases = NUM_BASES
 
+    @log_exception
     def delta_position_callback(self, msg):
         """
         Process incoming delta position messages.
@@ -85,14 +84,11 @@ class CoordinateProcessor(Node):
         Args:
             msg (geometry_msgs.msg.Point): Delta position message
         """
-        try:
-            position = [msg.x, msg.y]
-            self.positions_list.append(position)
-            self.get_logger().info(f"Received position: x={msg.x:.3f}, y={msg.y:.3f}")
-        except Exception as e:
-            self.get_logger().error(f"Error in delta_position_callback: {e}")
-            traceback.print_exc()
+        position = [msg.x, msg.y]
+        self.positions_list.append(position)
+        self.get_logger().info(f"Received position:({msg.x:.3f}, {msg.y:.3f})")
 
+    @log_exception
     def process_positions(self):
         """
         Process collected positions to identify unique bases.
@@ -106,38 +102,40 @@ class CoordinateProcessor(Node):
             to perform clustering.
         """
         if len(self.positions_list) < self.expected_bases:
-            self.get_logger().warn("Not enough positions collected to perform clustering.")
+            self.get_logger().warn(
+                f"Not enough positions collected to perform clustering. Expected {self.expected_bases} positions, but got {len(self.positions_list)}."
+            )
             return
 
         positions_array = np.array(self.positions_list)
 
-        try:
-            kmeans = KMeans(n_clusters=self.expected_bases)
-            kmeans.fit(positions_array)
-            self.unique_positions = kmeans.cluster_centers_.tolist()
+        kmeans = KMeans(n_clusters=self.expected_bases, algorithm="auto")
+        kmeans.fit(positions_array)
+        self.unique_positions = kmeans.cluster_centers_.tolist()
 
-            new_setpoints = []
-            pose_array = PoseArray()
-            pose_array.header.stamp = self.get_clock().now().to_msg()
-            pose_array.header.frame_id = 'map'
+        new_setpoints = []
+        pose_array = PoseArray()
+        pose_array.header.stamp = self.get_clock().now().to_msg()
+        pose_array.header.frame_id = "map"
 
-            for pos in self.unique_positions:
-                pose = Pose()
-                pose.position.x = pos[0]
-                pose.position.y = pos[1]
-                pose.position.z = 0.0
-                self.get_logger().info(f"Prepared coordinate ({pos[0]:.3f}, {pos[1]:.3f}, -1.5) to goto setpoints.")
+        for pos in self.unique_positions:
+            pose = Pose()
+            pose.position.x = pos[0]
+            pose.position.y = pos[1]
+            pose.position.z = 0.0
+            self.get_logger().info(
+                f"Prepared coordinate ({pos[0]:.3f}, {pos[1]:.3f}, -1.5) to goto setpoints."
+            )
 
-                new_setpoint = [pos[0], pos[1], -1.5]
-                new_setpoints.append(new_setpoint)
-                pose_array.poses.append(pose)
+            new_setpoint = [pos[0], pos[1], -1.5]
+            new_setpoints.append(new_setpoint)
+            pose_array.poses.append(pose)
 
-            self.unique_positions_publisher.publish(pose_array)
-            self.get_logger().info(f"Published {len(self.unique_positions)} unique positions.")
+        self.unique_positions_publisher.publish(pose_array)
+        self.get_logger().info(
+            f"Published {len(self.unique_positions)} unique positions."
+        )
 
-        except Exception as e:
-            self.get_logger().error(f"Error during clustering: {e}")
-            traceback.print_exc()
 
 def main(args=None):
     """
@@ -158,5 +156,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
