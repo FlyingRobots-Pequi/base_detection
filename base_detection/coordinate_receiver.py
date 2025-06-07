@@ -163,9 +163,6 @@ class CoordinateReceiver(Node):
             self.current_y = msg.y
             self.current_yaw = msg.heading
 
-            if self.current_altitude > -0.13:
-                self.get_logger().error("Altitude exceeds safe threshold! Engaging failsafe.")
-                self.failsafe_triggered = True
         except Exception as e:
             self.get_logger().error(f"Error in vehicle_local_position_callback: {e}")
             traceback.print_exc()

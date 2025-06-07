@@ -143,7 +143,7 @@ class ImageInferencer(Node):
                                 (int(self.x2), int(self.y2)), 
                                 (0, 255, 0), 4)
                     
-                    cv2.circle(result, (int(self.x1+self.x2)/2, int(self.y1+self.y2)/2), 5, (0, 0, 255), -1)
+                    cv2.circle(result, (int((self.x1 + self.x2) / 2), int((self.y1 + self.y2) / 2)), 5, (0, 0, 255), -1)
                     
                     cv2.putText(result, 
                             str(score), 
