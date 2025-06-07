@@ -6,7 +6,7 @@ setup(
     name=package_name,
     version='0.0.1',
     packages=[package_name],
-    install_requires=['setuptools', 'numpy<2.0.0', 'opencv-python', 'torch', 'ultralytics'],
+    install_requires=['setuptools', 'numpy<2.0.0', 'opencv-python', 'torch', 'ultralytics', 'scipy>=1.15.3'],
     include_package_data=True,
     package_data={'base_detection': ['best.pt']},
     zip_safe=True,

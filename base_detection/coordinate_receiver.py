@@ -32,7 +32,7 @@ from cv_bridge import CvBridge
 import numpy as np
 from px4_msgs.msg import VehicleLocalPosition
 from geometry_msgs.msg import Point
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from base_detection.variables import (
     DEPTH_IMAGE_TOPIC,
     VEHICLE_LOCAL_POSITION_TOPIC,
@@ -89,9 +89,9 @@ class CoordinateReceiver(Node):
         
         # QoS Profile Definition
         qos_profile = QoSProfile(
-            reliability=QoSReliabilityPolicy.RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT,
-            durability=QoSDurabilityPolicy.RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL,
-            history=QoSHistoryPolicy.RMW_QOS_POLICY_HISTORY_KEEP_LAST,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
         
