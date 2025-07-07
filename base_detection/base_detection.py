@@ -29,12 +29,11 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import torch
-from base_detection.configs import (
+from base_detection.variables import (
     COLOR_IMAGE_TOPIC,
     INFERRED_IMAGE_TOPIC,
     DETECTED_COORDINATES_TOPIC,
     COLOR_IMAGE_TOPIC2,
-    log_exception,
 )
 
 
@@ -82,7 +81,8 @@ class ImageInferencer(Node):
         self.model = YOLO("/root/ros2_ws/src/base_detection/base_detection/best.pt")
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+        self.get_logger().info(f"Using device: {device}")
+        
         self.model.to(device)
 
         # Initialize bounding box coordinates
@@ -93,7 +93,6 @@ class ImageInferencer(Node):
 
         self.threshold_helmet = 0.9
 
-    @log_exception
     def _inferenzzia(self, data):
         """
         Process incoming RGB images and perform base detection.
@@ -126,9 +125,33 @@ class ImageInferencer(Node):
         # Run YOLO inference
         results_fly = self.model(result)[0]
 
-        # Process detection results
         for result_fly in results_fly.boxes.data.tolist():
             self.x1, self.y1, self.x2, self.y2, score, class_id = result_fly
+            if score > self.threshold_helmet:
+                # Draw detection visualization
+                    cv2.rectangle(result, 
+                                (int(self.x1), int(self.y1)), 
+                                (int(self.x2), int(self.y2)), 
+                                (0, 255, 0), 4)
+                    
+                    # Calcular centro corretamente como inteiros
+                    center_x = int((self.x1 + self.x2) / 2)
+                    center_y = int((self.y1 + self.y2) / 2)
+                    cv2.circle(result, (center_x, center_y), 5, (0, 0, 255), -1)
+                    
+                    cv2.putText(result, 
+                            f"{score:.2f}", 
+                            (int(self.x1), int(self.y1) - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.7, 
+                            (0, 255, 0), 
+                            2, 
+                            cv2.LINE_AA)
+                
+                    # Publish detection coordinates
+                    coord_msg = Float32MultiArray()
+                    coord_msg.data = [self.x1, self.y1, self.x2, self.y2]
+                    self.coord_publisher.publish(coord_msg)
 
             if score > self.threshold_helmet:
                 # Draw detection visualization

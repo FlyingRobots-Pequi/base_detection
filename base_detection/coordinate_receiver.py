@@ -32,12 +32,13 @@ from cv_bridge import CvBridge
 import numpy as np
 from px4_msgs.msg import VehicleLocalPosition
 from geometry_msgs.msg import Point
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from base_detection.configs import (
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
+from base_detection.variables import (
     DEPTH_IMAGE_TOPIC,
     VEHICLE_LOCAL_POSITION_TOPIC,
     DETECTED_COORDINATES_TOPIC,
-    DELTA_POSITION_TOPIC,
+    DELTA_POINTS_TOPIC,
+    ABSOLUTE_POINTS_TOPIC,
     D455_BASELINE as BASELINE,
     D455_BIAS_X as BIAS_X,
     D455_BIAS_Y as BIAS_Y,
@@ -45,7 +46,13 @@ from base_detection.configs import (
     D455_FY_DEPTH as FY_DEPTH,
     D455_CX_DEPTH as CX_DEPTH,
     D455_CY_DEPTH as CY_DEPTH,
-    log_exception,
+    D455_RGB_WIDTH,
+    D455_RGB_HEIGHT,
+    D455_DEPTH_WIDTH,
+    D455_DEPTH_HEIGHT,
+    INITIAL_BASE_EXCLUSION_RADIUS,
+    INITIAL_BASE_X,
+    INITIAL_BASE_Y
 )
 
 
@@ -55,7 +62,11 @@ class CoordinateReceiver(Node):
 
     This class subscribes to detected coordinates, depth images, and vehicle position data,
     processes this information to calculate real-world 3D positions of detected bases, and
-    publishes the results for navigation purposes.
+    publishes both relative (delta) and absolute coordinates for navigation purposes.
+
+    The node implements robust coordinate transformation that automatically handles different
+    resolutions between RGB and depth cameras by calculating precise scaling factors,
+    eliminating the need for coordinate clamping and improving position accuracy.
 
     Attributes:
         bias_x (float): X-axis bias correction value
@@ -71,6 +82,8 @@ class CoordinateReceiver(Node):
         current_y (float): Current vehicle Y position
         current_yaw (float): Current vehicle yaw angle
         failsafe_triggered (bool): Flag indicating if failsafe has been triggered
+        rgb_width (int): RGB image width for coordinate transformation
+        rgb_height (int): RGB image height for coordinate transformation
     """
 
     def __init__(self):
@@ -90,10 +103,10 @@ class CoordinateReceiver(Node):
 
         # QoS Profile Definition
         qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1
         )
 
         self.subscription = self.create_subscription(
@@ -105,20 +118,51 @@ class CoordinateReceiver(Node):
         )
 
         self.local_position_sub = self.create_subscription(
-            VehicleLocalPosition,
-            VEHICLE_LOCAL_POSITION_TOPIC,
-            self.vehicle_local_position_callback,
-            qos_profile,
-        )
-
-        self.delta_publisher = self.create_publisher(Point, DELTA_POSITION_TOPIC, 10)
+            VehicleLocalPosition, 
+            VEHICLE_LOCAL_POSITION_TOPIC, 
+            self.vehicle_local_position_callback, 
+            qos_profile)
+        
+        self.delta_publisher = self.create_publisher(
+            Point, 
+            DELTA_POINTS_TOPIC, 
+            10)
+        
+        self.absolute_publisher = self.create_publisher(
+            Point, 
+            ABSOLUTE_POINTS_TOPIC, 
+            10)
+        
 
         self.bridge = CvBridge()
 
         self.latest_depth = None
         self.failsafe_triggered = False
+        
+        # Initialize vehicle position variables
+        self.current_altitude = 0.0
+        self.current_x = 0.0
+        self.current_y = 0.0
+        self.current_yaw = 0.0
+        
+        # Initialize RGB image dimensions (will be detected automatically)
+        self.rgb_width = None
+        self.rgb_height = None
 
-    @log_exception
+    def is_near_initial_base(self, x, y):
+        """
+        Check if a position is too close to the initial base location.
+        
+        Args:
+            x (float): X coordinate to check
+            y (float): Y coordinate to check
+            
+        Returns:
+            bool: True if position is within exclusion radius of initial base
+        """
+        distance = np.sqrt((x - INITIAL_BASE_X)**2 + (y - INITIAL_BASE_Y)**2)
+        return distance <= INITIAL_BASE_EXCLUSION_RADIUS
+
     def depth_callback(self, msg):
         """
         Process incoming depth image messages.
@@ -135,7 +179,6 @@ class CoordinateReceiver(Node):
         depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
         self.latest_depth = depth_image.astype(np.float32)
 
-    @log_exception
     def vehicle_local_position_callback(self, msg):
         """
         Process vehicle position updates and check safety conditions.
@@ -149,12 +192,15 @@ class CoordinateReceiver(Node):
         Note:
             Triggers failsafe if altitude exceeds -0.13m (NED frame)
         """
-        self.current_altitude = msg.z
-        self.current_x = msg.x
-        self.current_y = msg.y
-        self.current_yaw = msg.heading
+        try:
+            self.current_altitude = msg.z
+            self.current_x = msg.x
+            self.current_y = msg.y
+            self.current_yaw = msg.heading
+        except Exception as e:
+            self.get_logger().error(f"Error in vehicle_local_position_callback: {e}")
+            traceback.print_exc()
 
-    @log_exception
     def listener_callback(self, msg):
         """
         Process detected base coordinates and calculate real-world positions.
@@ -162,10 +208,12 @@ class CoordinateReceiver(Node):
         This method:
         1. Validates the bounding box dimensions
         2. Calculates the midpoint in image coordinates
-        3. Retrieves depth information
-        4. Transforms image coordinates to real-world coordinates
-        5. Applies necessary corrections and transformations
-        6. Publishes the resulting delta position
+        3. Auto-detects RGB image dimensions and calculates scaling factors
+        4. Transforms RGB coordinates to depth coordinate space
+        5. Retrieves depth information using transformed coordinates
+        6. Transforms image coordinates to real-world coordinates
+        7. Applies necessary corrections and transformations
+        8. Publishes both relative (delta) and absolute positions
 
         Args:
             msg (std_msgs.msg.Float32MultiArray): Array containing bounding box coordinates
@@ -173,17 +221,17 @@ class CoordinateReceiver(Node):
                 bottom-right corner of the detected base
 
         Note:
-            Implements various safety checks including:
-            - Bounding box aspect ratio validation
-            - Depth value validation
-            - Coordinate transformation verification
+            Implements robust coordinate transformation that:
+            - Auto-detects RGB image dimensions from coordinate ranges
+            - Calculates precise scaling factors between RGB and depth resolutions
+            - Eliminates coordinate clamping for improved accuracy
+            - Provides detailed logging for debugging resolution mismatches
+            - Ensures vehicle position-based absolute coordinate calculation
         """
         try:
             # Unpack coordinates
             x1, y1, x2, y2 = msg.data
-            self.get_logger().info(
-                f"Received coordinates: ({x1}, {y1}), ({x2}, {y2})"
-            )
+            self.get_logger().info(f"Received coordinates: p1=({x1:.3f}, {y1:.3f}), p2=({x2:.3f}, {y2:.3f})")
 
             # Calculate bounding box dimensions
             bbox_width = abs(x2 - x1)
@@ -199,17 +247,119 @@ class CoordinateReceiver(Node):
                 # cálculo do centro da bounding‐box
                 mid_x_rgb = int((x1 + x2) / 2)
                 mid_y_rgb = int((y1 + y2) / 2)
+                self.get_logger().info(f"Midpoint of the bounding box (RGB): ({mid_x_rgb:.3f}, {mid_y_rgb:.3f})")
 
                 # busca depth_value, usando valor padrão se latest_depth for None ou inválido
                 if self.latest_depth is not None:
-                    raw = self.latest_depth[mid_y_rgb, mid_x_rgb]
-                    if np.isnan(raw) or raw <= 0:
-                        self.get_logger().warning(
-                            "Invalid depth value encountered. Using default for simulation."
-                        )
-                        depth_value = np.float32(-0.4)
-                    else:
-                        depth_value = raw
+                    # Get depth image dimensions
+                    depth_height, depth_width = self.latest_depth.shape
+                    self.get_logger().info(f"Depth image dimensions: {depth_width}x{depth_height}")
+                    
+                    # Auto-detect RGB image dimensions from coordinates if not set
+                    if self.rgb_width is None or self.rgb_height is None:
+                        # Estimate RGB dimensions based on coordinate ranges and common camera resolutions
+                        max_coord_x = max(x1, x2)
+                        max_coord_y = max(y1, y2)
+                        
+                        # Use standard D455 RGB resolution as default
+                        self.rgb_width = D455_RGB_WIDTH
+                        self.rgb_height = D455_RGB_HEIGHT
+                        
+                        # Override if coordinates suggest different resolution
+                        if max_coord_x > 1920:
+                            self.get_logger().warning(f"Coordinates exceed standard RGB width. Using coordinate-based estimation.")
+                            self.rgb_width = max(int(max_coord_x * 1.1), D455_RGB_WIDTH)
+                        if max_coord_y > 1080:
+                            self.get_logger().warning(f"Coordinates exceed standard RGB height. Using coordinate-based estimation.")
+                            self.rgb_height = max(int(max_coord_y * 1.1), D455_RGB_HEIGHT)
+                            
+                        self.get_logger().info(f"RGB image dimensions detected/set: {self.rgb_width}x{self.rgb_height}")
+                    
+                    # Calculate robust scaling factors for coordinate transformation
+                    scale_x = depth_width / self.rgb_width
+                    scale_y = depth_height / self.rgb_height
+                    
+                    # Transform RGB coordinates to depth coordinate space
+                    mid_x_depth = int(mid_x_rgb * scale_x)
+                    mid_y_depth = int(mid_y_rgb * scale_y)
+                    
+                    self.get_logger().info(f"Scaling factors: x={scale_x:.4f}, y={scale_y:.4f}")
+                    self.get_logger().info(f"Transformed coordinates: RGB({mid_x_rgb}, {mid_y_rgb}) -> Depth({mid_x_depth}, {mid_y_depth})")
+                    
+                    # Validate transformed coordinates are within depth image bounds
+                    if (mid_x_depth < 0 or mid_x_depth >= depth_width or 
+                        mid_y_depth < 0 or mid_y_depth >= depth_height):
+                        self.get_logger().error(f"Transformed coordinates ({mid_x_depth}, {mid_y_depth}) are outside depth image bounds ({depth_width}x{depth_height}). This indicates a significant resolution mismatch or calibration issue.")
+                        return
+
+                    # Get and validate depth value
+                    depth_value = self.latest_depth[mid_y_depth, mid_x_depth]
+                    if np.isnan(depth_value) or depth_value <= 0:
+                        self.get_logger().warning(f"Invalid depth value at ({mid_x_depth:.3f}, {mid_y_depth:.3f}): {depth_value:.3f}")
+                        return
+
+                    # Convert depth to meters
+                    z = depth_value / 1000.0
+                    self.get_logger().info(f"Depth at center: {z:.3f} meters")
+
+                    delta_x = (mid_x_depth - CX_DEPTH) * z / FX_DEPTH if FX_DEPTH != 0 else 0
+                    delta_y = (mid_y_depth - CY_DEPTH) * z / FY_DEPTH if FY_DEPTH != 0 else 0
+
+                    # Apply corrections
+                    delta_x += BASELINE
+                    delta_x -= BIAS_X 
+                    delta_y -= BIAS_Y 
+
+                    self.get_logger().info(f"Delta real (x,y): ({delta_x:.3f}, {delta_y:.3f}) meters")
+                    
+                    # Publish relative coordinates (delta)
+                    delta_point = Point()
+                    delta_point.x = delta_x
+                    delta_point.y = delta_y
+                    delta_point.z = 0.0
+                    self.delta_publisher.publish(delta_point)
+                    
+                    # Calculate and publish absolute coordinates
+                    # Apply rotation based on vehicle yaw (heading)
+                    cos_yaw = np.cos(self.current_yaw)
+                    sin_yaw = np.sin(self.current_yaw)
+                    
+                    # Transform relative coordinates to global frame
+                    # Note: In NED frame, X is North, Y is East
+                    global_x = self.current_x + (delta_x * cos_yaw - delta_y * sin_yaw)
+                    global_y = self.current_y + (delta_x * sin_yaw + delta_y * cos_yaw)
+                    
+                    self.get_logger().info(f"Vehicle position (x,y): ({self.current_x:.3f}, {self.current_y:.3f}) meters")
+                    self.get_logger().info(f"Vehicle yaw: {self.current_yaw:.3f} radians")
+                    self.get_logger().info(f"Absolute position (x,y): ({global_x:.3f}, {global_y:.3f}) meters")
+                    
+                    # Filter out positions too close to initial base
+                    if self.is_near_initial_base(global_x, global_y):
+                        distance_to_origin = np.sqrt(global_x**2 + global_y**2)
+                        self.get_logger().info(f"Base detected near initial position (distance: {distance_to_origin:.3f}m < {INITIAL_BASE_EXCLUSION_RADIUS:.3f}m). Filtering out to focus on remote bases.")
+                        # Still publish relative coordinates for debugging
+                        delta_point = Point()
+                        delta_point.x = delta_x
+                        delta_point.y = delta_y
+                        delta_point.z = 0.0
+                        self.delta_publisher.publish(delta_point)
+                        return
+                    
+                    # Publish absolute coordinates (only for bases away from initial position)
+                    absolute_point = Point()
+                    absolute_point.x = global_x
+                    absolute_point.y = global_y
+                    absolute_point.z = 0.0
+                    self.absolute_publisher.publish(absolute_point)
+                    self.get_logger().info(f"Published absolute position for remote base: ({global_x:.3f}, {global_y:.3f})")
+                    
+                    # Also publish relative coordinates for compatibility
+                    delta_point = Point()
+                    delta_point.x = delta_x
+                    delta_point.y = delta_y
+                    delta_point.z = 0.0
+                    self.delta_publisher.publish(delta_point)
+                    
                 else:
                     self.get_logger().warning(
                         "No depth data available. Using default for simulation."
