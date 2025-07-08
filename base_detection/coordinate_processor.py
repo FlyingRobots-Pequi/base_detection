@@ -13,26 +13,24 @@ The node:
 - Saves setpoints to YAML configuration
 - Publishes unique positions for navigation
 - Provides graceful shutdown service
-- Creates visual map for rqt_image_view
+- Creates visual markers for RViz
 
 Dependencies:
     - ROS2
     - NumPy
     - scikit-learn
     - PyYAML
-    - OpenCV
     - geometry_msgs
-    - sensor_msgs
+    - visualization_msgs
     - std_srvs
 """
 import traceback
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Point, PoseArray, Pose
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import ColorRGBA
 import numpy as np
-import cv2
 from sklearn.cluster import KMeans, DBSCAN
 from base_detection.variables import (
     ABSOLUTE_POINTS_TOPIC,
@@ -62,7 +60,6 @@ class CoordinateProcessor(Node):
         expected_bases (int): Expected number of bases in the arena
         use_dbscan (bool): Whether to use DBSCAN instead of K-means
         outlier_threshold (float): IQR multiplier for outlier detection
-        cv_bridge (CvBridge): Bridge for converting OpenCV images to ROS messages
     """
 
     def __init__(self):
@@ -72,7 +69,7 @@ class CoordinateProcessor(Node):
         Sets up:
         - Subscription to absolute positions
         - Publisher for unique positions
-        - Publisher for visual map
+        - Publisher for RViz markers
         - Shutdown service
         - Data structures for position processing
         """
@@ -88,9 +85,9 @@ class CoordinateProcessor(Node):
             PoseArray, UNIQUE_POSITIONS_TOPIC, 10
         )
 
-        # Image publisher for visual map
-        self.map_image_publisher = self.create_publisher(
-            Image, "/base_detection/position_map", 10
+        # RViz markers publisher
+        self.markers_publisher = self.create_publisher(
+            MarkerArray, "/base_detection/visualization_markers", 10
         )
 
         self.positions_list = []
@@ -103,14 +100,6 @@ class CoordinateProcessor(Node):
         self.dbscan_eps = 0.9  # DBSCAN epsilon parameter (max distance between points in cluster)
         self.dbscan_min_samples = 3  # DBSCAN minimum samples per cluster
         
-        # Image visualization parameters
-        self.cv_bridge = CvBridge()
-        self.map_width = 800
-        self.map_height = 800
-        self.map_scale = 10  # pixels per meter
-        self.map_center_x = self.map_width // 2
-        self.map_center_y = self.map_height // 2
-        
         # Ground truth base positions
         self.ground_truth_bases = [
             (-0.24, -3.23),  # BASE_1
@@ -119,25 +108,64 @@ class CoordinateProcessor(Node):
             (4.37, -2.30),   # BASE_4
             (5.69, -0.25),   # BASE_5
         ]
+        
+        # Marker ID counter
+        self.marker_id_counter = 0
 
-    def world_to_image(self, x, y):
+    def create_marker(self, marker_type, position, color, scale, text="", marker_id=None):
         """
-        Convert world coordinates to image pixel coordinates.
+        Create a RViz marker with specified properties.
         
         Args:
-            x (float): World X coordinate in meters
-            y (float): World Y coordinate in meters
+            marker_type: Marker type (Marker.SPHERE, Marker.CYLINDER, etc.)
+            position: (x, y, z) position tuple
+            color: (r, g, b, a) color tuple (0-1 range)
+            scale: (x, y, z) scale tuple
+            text: Text for TEXT_VIEW_FACING markers
+            marker_id: Specific marker ID (auto-generated if None)
             
         Returns:
-            tuple: (pixel_x, pixel_y) in image coordinates
+            Marker: Configured RViz marker
         """
-        pixel_x = int(self.map_center_x + x * self.map_scale)
-        pixel_y = int(self.map_center_y - y * self.map_scale)  # Invert Y for image coordinates
-        return pixel_x, pixel_y
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        
+        if marker_id is None:
+            marker.id = self.marker_id_counter
+            self.marker_id_counter += 1
+        else:
+            marker.id = marker_id
+            
+        marker.type = marker_type
+        marker.action = Marker.ADD
+        
+        # Position
+        marker.pose.position.x = float(position[0])
+        marker.pose.position.y = float(position[1])
+        marker.pose.position.z = float(position[2]) if len(position) > 2 else 0.0
+        marker.pose.orientation.w = 1.0
+        
+        # Scale
+        marker.scale.x = float(scale[0])
+        marker.scale.y = float(scale[1])
+        marker.scale.z = float(scale[2])
+        
+        # Color
+        marker.color.r = float(color[0])
+        marker.color.g = float(color[1])
+        marker.color.b = float(color[2])
+        marker.color.a = float(color[3])
+        
+        # Text
+        if text:
+            marker.text = text
+            
+        return marker
 
-    def create_position_map(self, all_positions, filtered_positions, cluster_centers, cluster_labels=None):
+    def create_visualization_markers(self, all_positions, filtered_positions, cluster_centers, cluster_labels=None):
         """
-        Create a visual map of all positions, filtered positions, and cluster centers.
+        Create RViz markers for all detected data.
         
         Args:
             all_positions (np.array): All detected positions
@@ -146,115 +174,138 @@ class CoordinateProcessor(Node):
             cluster_labels (np.array): Cluster labels for each filtered position (optional)
             
         Returns:
-            np.array: RGB image array
+            MarkerArray: Array of RViz markers
         """
-        # Create blank image
-        img = np.ones((self.map_height, self.map_width, 3), dtype=np.uint8) * 255
+        markers = MarkerArray()
+        self.marker_id_counter = 0
         
-        # Define colors
-        outlier_color = (128, 128, 128)  # Gray for outliers
-        raw_point_color = (255, 0, 0)   # Red for raw points
-        filtered_point_color = (0, 255, 0)  # Green for filtered points
-        cluster_colors = [
-            (255, 0, 255),    # Magenta
-            (0, 255, 255),    # Cyan
-            (255, 255, 0),    # Yellow
-            (255, 128, 0),    # Orange
-            (128, 0, 255),    # Purple
-            (0, 128, 255),    # Light blue
-            (255, 0, 128),    # Pink
-        ]
-        cluster_center_color = (0, 0, 255)  # Blue for cluster centers
-        initial_base_color = (0, 0, 0)      # Black for initial base
-        ground_truth_color = (255, 165, 0)  # Orange for ground truth bases
+        # Clear previous markers
+        clear_marker = Marker()
+        clear_marker.action = Marker.DELETEALL
+        markers.markers.append(clear_marker)
         
-        # Draw grid
-        grid_spacing = int(1.0 * self.map_scale)  # 1 meter grid
-        for i in range(0, self.map_width, grid_spacing):
-            cv2.line(img, (i, 0), (i, self.map_height), (240, 240, 240), 1)
-        for i in range(0, self.map_height, grid_spacing):
-            cv2.line(img, (0, i), (self.map_width, i), (240, 240, 240), 1)
+        # Ground truth bases
+        for i, base_pos in enumerate(self.ground_truth_bases):
+            # Base marker
+            marker = self.create_marker(
+                Marker.CYLINDER,
+                (base_pos[0], base_pos[1], 0.0),
+                (1.0, 0.647, 0.0, 0.8),  # Orange
+                (0.3, 0.3, 0.1)
+            )
+            markers.markers.append(marker)
             
-        # Draw axes
-        cv2.line(img, (self.map_center_x, 0), (self.map_center_x, self.map_height), (200, 200, 200), 2)
-        cv2.line(img, (0, self.map_center_y), (self.map_width, self.map_center_y), (200, 200, 200), 2)
+            # Label
+            label_marker = self.create_marker(
+                Marker.TEXT_VIEW_FACING,
+                (base_pos[0], base_pos[1], 0.3),
+                (1.0, 0.647, 0.0, 1.0),  # Orange
+                (0.3, 0.3, 0.3),
+                f"GT_BASE_{i+1}"
+            )
+            markers.markers.append(label_marker)
         
-        # Draw initial base position
-        init_px, init_py = self.world_to_image(INITIAL_BASE_X, INITIAL_BASE_Y)
-        if 0 <= init_px < self.map_width and 0 <= init_py < self.map_height:
-            cv2.circle(img, (init_px, init_py), 15, initial_base_color, -1)
-            cv2.circle(img, (init_px, init_py), int(INITIAL_BASE_EXCLUSION_RADIUS * self.map_scale), 
-                      initial_base_color, 2)
+        # Initial base position and exclusion radius
+        if INITIAL_BASE_X != 0 or INITIAL_BASE_Y != 0:
+            # Initial base marker
+            initial_marker = self.create_marker(
+                Marker.CYLINDER,
+                (INITIAL_BASE_X, INITIAL_BASE_Y, 0.0),
+                (0.0, 0.0, 0.0, 1.0),  # Black
+                (0.4, 0.4, 0.1)
+            )
+            markers.markers.append(initial_marker)
+            
+            # Exclusion radius
+            radius_marker = self.create_marker(
+                Marker.CYLINDER,
+                (INITIAL_BASE_X, INITIAL_BASE_Y, 0.0),
+                (0.0, 0.0, 0.0, 0.2),  # Semi-transparent black
+                (INITIAL_BASE_EXCLUSION_RADIUS * 2, INITIAL_BASE_EXCLUSION_RADIUS * 2, 0.02)
+            )
+            markers.markers.append(radius_marker)
+            
+            # Label
+            initial_label = self.create_marker(
+                Marker.TEXT_VIEW_FACING,
+                (INITIAL_BASE_X, INITIAL_BASE_Y, 0.3),
+                (0.0, 0.0, 0.0, 1.0),
+                (0.3, 0.3, 0.3),
+                "INITIAL_BASE"
+            )
+            markers.markers.append(initial_label)
         
-        # Identify outliers (points in all_positions but not in filtered_positions)
+        # Outliers (points in all_positions but not in filtered_positions)
         if len(all_positions) > 0 and len(filtered_positions) > 0:
-            # Create a set of filtered positions for quick lookup
             filtered_set = set(map(tuple, filtered_positions))
             
-            # Draw outliers
             for pos in all_positions:
                 if tuple(pos) not in filtered_set:
-                    px, py = self.world_to_image(pos[0], pos[1])
-                    if 0 <= px < self.map_width and 0 <= py < self.map_height:
-                        cv2.circle(img, (px, py), 4, outlier_color, -1)
+                    outlier_marker = self.create_marker(
+                        Marker.SPHERE,
+                        (pos[0], pos[1], 0.0),
+                        (0.5, 0.5, 0.5, 0.6),  # Gray
+                        (0.1, 0.1, 0.1)
+                    )
+                    markers.markers.append(outlier_marker)
         
-        # Draw filtered positions with cluster colors if available
-        if len(filtered_positions) > 0:
-            for i, pos in enumerate(filtered_positions):
-                px, py = self.world_to_image(pos[0], pos[1])
-                if 0 <= px < self.map_width and 0 <= py < self.map_height:
-                    if cluster_labels is not None and i < len(cluster_labels):
-                        label = cluster_labels[i]
-                        if label == -1:  # Noise point
-                            color = outlier_color
-                        else:
-                            color = cluster_colors[label % len(cluster_colors)]
-                    else:
-                        color = filtered_point_color
-                    cv2.circle(img, (px, py), 6, color, -1)
-        
-        # Draw cluster centers
-        for i, center in enumerate(cluster_centers):
-            px, py = self.world_to_image(center[0], center[1])
-            if 0 <= px < self.map_width and 0 <= py < self.map_height:
-                # Draw larger circle for cluster center
-                cv2.circle(img, (px, py), 12, cluster_center_color, 3)
-                # Add label
-                cv2.putText(img, f"{i+1}", (px-8, py+4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, cluster_center_color, 2)
-        
-        # Draw ground truth bases
-        for i, base_pos in enumerate(self.ground_truth_bases):
-            px, py = self.world_to_image(base_pos[0], base_pos[1])
-            if 0 <= px < self.map_width and 0 <= py < self.map_height:
-                cv2.circle(img, (px, py), 10, ground_truth_color, -1)
-                cv2.putText(img, f"GT_{i+1}", (px-15, py+5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ground_truth_color, 1)
-        
-        # Add legend
-        legend_y = 30
-        cv2.putText(img, "Legend:", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        
-        legend_items = [
-            ("Initial Base", initial_base_color),
-            ("Outliers", outlier_color),
-            ("Filtered Points", filtered_point_color),
-            ("Cluster Centers", cluster_center_color),
-            ("Ground Truth Bases", ground_truth_color),
+        # Cluster colors for DBSCAN
+        cluster_colors = [
+            (1.0, 0.0, 1.0, 0.8),    # Magenta
+            (0.0, 1.0, 1.0, 0.8),    # Cyan
+            (1.0, 1.0, 0.0, 0.8),    # Yellow
+            (1.0, 0.5, 0.0, 0.8),    # Orange
+            (0.5, 0.0, 1.0, 0.8),    # Purple
+            (0.0, 0.5, 1.0, 0.8),    # Light blue
+            (1.0, 0.0, 0.5, 0.8),    # Pink
         ]
         
-        for i, (label, color) in enumerate(legend_items):
-            y_pos = legend_y + 25 * (i + 1)
-            cv2.circle(img, (20, y_pos - 5), 5, color, -1)
-            cv2.putText(img, label, (35, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+        # Filtered positions with cluster colors if available
+        if len(filtered_positions) > 0:
+            for i, pos in enumerate(filtered_positions):
+                if cluster_labels is not None and i < len(cluster_labels):
+                    label = cluster_labels[i]
+                    if label == -1:  # Noise point
+                        color = (0.5, 0.5, 0.5, 0.6)  # Gray
+                    else:
+                        color = cluster_colors[label % len(cluster_colors)]
+                else:
+                    color = (0.0, 1.0, 0.0, 0.8)  # Green
+                
+                point_marker = self.create_marker(
+                    Marker.SPHERE,
+                    (pos[0], pos[1], 0.0),
+                    color,
+                    (0.15, 0.15, 0.15)
+                )
+                markers.markers.append(point_marker)
         
-        # Add coordinate info
-        info_text = f"Scale: {self.map_scale} px/m | Points: {len(all_positions)} | Filtered: {len(filtered_positions)} | Clusters: {len(cluster_centers)}"
-        cv2.putText(img, info_text, (10, self.map_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+        # Cluster centers
+        for i, center in enumerate(cluster_centers):
+            # Center marker
+            center_marker = self.create_marker(
+                Marker.SPHERE,
+                (center[0], center[1], 0.0),
+                (0.0, 0.0, 1.0, 1.0),  # Blue
+                (0.25, 0.25, 0.25)
+            )
+            markers.markers.append(center_marker)
+            
+            # Label
+            center_label = self.create_marker(
+                Marker.TEXT_VIEW_FACING,
+                (center[0], center[1], 0.3),
+                (0.0, 0.0, 1.0, 1.0),  # Blue
+                (0.3, 0.3, 0.3),
+                f"CLUSTER_{i+1}"
+            )
+            markers.markers.append(center_label)
         
-        return img
+        return markers
 
-    def publish_position_map(self, all_positions, filtered_positions, cluster_centers, cluster_labels=None):
+    def publish_visualization_markers(self, all_positions, filtered_positions, cluster_centers, cluster_labels=None):
         """
-        Create and publish the position map image.
+        Create and publish RViz markers for visualization.
         
         Args:
             all_positions (np.array): All detected positions
@@ -263,20 +314,12 @@ class CoordinateProcessor(Node):
             cluster_labels (np.array): Cluster labels for each filtered position (optional)
         """
         try:
-            # Create the map image
-            map_img = self.create_position_map(all_positions, filtered_positions, cluster_centers, cluster_labels)
-            
-            # Convert to ROS Image message
-            ros_image = self.cv_bridge.cv2_to_imgmsg(map_img, encoding="rgb8")
-            ros_image.header.stamp = self.get_clock().now().to_msg()
-            ros_image.header.frame_id = "map"
-            
-            # Publish the image
-            self.map_image_publisher.publish(ros_image)
-            self.get_logger().info("Published position map image")
+            markers = self.create_visualization_markers(all_positions, filtered_positions, cluster_centers, cluster_labels)
+            self.markers_publisher.publish(markers)
+            self.get_logger().info(f"Published {len(markers.markers)} RViz markers")
             
         except Exception as e:
-            self.get_logger().error(f"Error creating/publishing position map: {e}")
+            self.get_logger().error(f"Error creating/publishing RViz markers: {e}")
             traceback.print_exc()
 
     def is_near_initial_base(self, x, y):
@@ -488,8 +531,8 @@ class CoordinateProcessor(Node):
             self.get_logger().info(f"List of unique positions: {[f'({pos[0]:.3f}, {pos[1]:.3f})' for pos in self.unique_positions]}")
             self.get_logger().info(f"Published {len(self.unique_positions)} unique positions.")
             
-            # Publish visual map
-            self.publish_position_map(positions_array, filtered_positions, self.unique_positions, cluster_labels)
+            # Publish visual markers
+            self.publish_visualization_markers(positions_array, filtered_positions, self.unique_positions, cluster_labels)
             
             # Calculate and log detection accuracy
             self.calculate_detection_accuracy(self.unique_positions)
