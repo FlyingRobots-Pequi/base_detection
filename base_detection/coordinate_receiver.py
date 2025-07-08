@@ -253,7 +253,6 @@ class CoordinateReceiver(Node):
                 if self.latest_depth is not None:
                     # Get depth image dimensions
                     depth_height, depth_width = self.latest_depth.shape
-                    self.get_logger().info(f"Depth image dimensions: {depth_width}x{depth_height}")
                     
                     # Auto-detect RGB image dimensions from coordinates if not set
                     if self.rgb_width is None or self.rgb_height is None:
@@ -272,8 +271,6 @@ class CoordinateReceiver(Node):
                         if max_coord_y > 1080:
                             self.get_logger().warning(f"Coordinates exceed standard RGB height. Using coordinate-based estimation.")
                             self.rgb_height = max(int(max_coord_y * 1.1), D455_RGB_HEIGHT)
-                            
-                        self.get_logger().info(f"RGB image dimensions detected/set: {self.rgb_width}x{self.rgb_height}")
                     
                     # Calculate robust scaling factors for coordinate transformation
                     scale_x = depth_width / self.rgb_width
@@ -283,7 +280,6 @@ class CoordinateReceiver(Node):
                     mid_x_depth = int(mid_x_rgb * scale_x)
                     mid_y_depth = int(mid_y_rgb * scale_y)
                     
-                    self.get_logger().info(f"Scaling factors: x={scale_x:.4f}, y={scale_y:.4f}")
                     self.get_logger().info(f"Transformed coordinates: RGB({mid_x_rgb}, {mid_y_rgb}) -> Depth({mid_x_depth}, {mid_y_depth})")
                     
                     # Validate transformed coordinates are within depth image bounds
@@ -329,8 +325,7 @@ class CoordinateReceiver(Node):
                     global_x = self.current_x + (delta_x * cos_yaw - delta_y * sin_yaw)
                     global_y = self.current_y + (delta_x * sin_yaw + delta_y * cos_yaw)
                     
-                    self.get_logger().info(f"Vehicle position (x,y): ({self.current_x:.3f}, {self.current_y:.3f}) meters")
-                    self.get_logger().info(f"Vehicle yaw: {self.current_yaw:.3f} radians")
+                    self.get_logger().info(f"Vehicle position (x,y): ({self.current_x:.3f}, {self.current_y:.3f}) meters, yaw: {self.current_yaw:.3f} radians")
                     self.get_logger().info(f"Absolute position (x,y): ({global_x:.3f}, {global_y:.3f}) meters")
                     
                     # Filter out positions too close to initial base
