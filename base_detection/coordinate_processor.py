@@ -90,9 +90,14 @@ class CoordinateProcessor(Node):
             MarkerArray, "/base_detection/visualization_markers", 10
         )
 
-        self.positions_list = []
-        self.unique_positions = []
+        self.positions_list = []  # List of [x, y, z] positions with altitude
+        self.unique_positions = []  # List of unique base positions with altitudes
         self.expected_bases = 5
+        
+        # Frame-based detection grouping
+        self.frame_detections = []  # Temporary storage for detections from current frame
+        self.last_detection_time = 0.0
+        self.frame_timeout = 0.1  # 100ms timeout to group detections from same frame
         
         # Outlier detection parameters
         self.use_dbscan = False  # Use DBSCAN for better outlier handling
@@ -100,13 +105,13 @@ class CoordinateProcessor(Node):
         self.dbscan_eps = 0.9  # DBSCAN epsilon parameter (max distance between points in cluster)
         self.dbscan_min_samples = 3  # DBSCAN minimum samples per cluster
         
-        # Ground truth base positions
+        # Ground truth base positions (now including Z for better visualization)
         self.ground_truth_bases = [
-            (-0.24, -3.23),  # BASE_1
-            (0.75, -5.05),   # BASE_2
-            (5.16, -5.75),   # BASE_3
-            (4.37, -2.30),   # BASE_4
-            (5.69, -0.25),   # BASE_5
+            (-0.24, -3.23, 0.0),  # BASE_1
+            (0.75, -5.05, 0.0),   # BASE_2
+            (5.16, -5.75, 0.0),   # BASE_3
+            (4.37, -2.30, 0.0),   # BASE_4
+            (5.69, -0.25, 0.0),   # BASE_5
         ]
         
         # Marker ID counter
@@ -189,7 +194,7 @@ class CoordinateProcessor(Node):
             # Base marker
             marker = self.create_marker(
                 Marker.CYLINDER,
-                (base_pos[0], base_pos[1], 0.0),
+                (base_pos[0], base_pos[1], base_pos[2]),
                 (1.0, 0.647, 0.0, 0.8),  # Orange
                 (0.3, 0.3, 0.1)
             )
@@ -198,7 +203,7 @@ class CoordinateProcessor(Node):
             # Label
             label_marker = self.create_marker(
                 Marker.TEXT_VIEW_FACING,
-                (base_pos[0], base_pos[1], 0.3),
+                (base_pos[0], base_pos[1], base_pos[2] + 0.3),
                 (1.0, 0.647, 0.0, 1.0),  # Orange
                 (0.3, 0.3, 0.3),
                 f"GT_BASE_{i+1}"
@@ -243,7 +248,7 @@ class CoordinateProcessor(Node):
                 if tuple(pos) not in filtered_set:
                     outlier_marker = self.create_marker(
                         Marker.SPHERE,
-                        (pos[0], pos[1], 0.0),
+                        (pos[0], pos[1], pos[2]),
                         (0.5, 0.5, 0.5, 0.6),  # Gray
                         (0.1, 0.1, 0.1)
                     )
@@ -260,7 +265,7 @@ class CoordinateProcessor(Node):
             (1.0, 0.0, 0.5, 0.8),    # Pink
         ]
         
-        # Filtered positions with cluster colors if available
+        # Filtered positions with cluster colors if available (DETECTED BASE POSITIONS)
         if len(filtered_positions) > 0:
             for i, pos in enumerate(filtered_positions):
                 if cluster_labels is not None and i < len(cluster_labels):
@@ -272,32 +277,42 @@ class CoordinateProcessor(Node):
                 else:
                     color = (0.0, 1.0, 0.0, 0.8)  # Green
                 
+                # Marker for detected base position
                 point_marker = self.create_marker(
                     Marker.SPHERE,
-                    (pos[0], pos[1], 0.0),
+                    (pos[0], pos[1], pos[2]),
                     color,
                     (0.15, 0.15, 0.15)
                 )
                 markers.markers.append(point_marker)
         
-        # Cluster centers
+        # Cluster centers (FINAL DETECTED BASES)
         for i, center in enumerate(cluster_centers):
-            # Center marker
+            # Main center marker - larger and more prominent
             center_marker = self.create_marker(
-                Marker.SPHERE,
-                (center[0], center[1], 0.0),
+                Marker.CYLINDER,
+                (center[0], center[1], center[2]),
                 (0.0, 0.0, 1.0, 1.0),  # Blue
-                (0.25, 0.25, 0.25)
+                (0.4, 0.4, 0.2)  # Larger cylinder for prominence
             )
             markers.markers.append(center_marker)
             
-            # Label
+            # Add detection confidence ring around the base
+            confidence_ring = self.create_marker(
+                Marker.CYLINDER,
+                (center[0], center[1], center[2] + 0.1),
+                (0.0, 0.0, 1.0, 0.3),  # Semi-transparent blue
+                (0.8, 0.8, 0.05)  # Large flat ring
+            )
+            markers.markers.append(confidence_ring)
+            
+            # Label with "DETECTED BASE" prefix
             center_label = self.create_marker(
                 Marker.TEXT_VIEW_FACING,
-                (center[0], center[1], 0.3),
+                (center[0], center[1], center[2] + 0.5),
                 (0.0, 0.0, 1.0, 1.0),  # Blue
-                (0.3, 0.3, 0.3),
-                f"CLUSTER_{i+1}"
+                (0.4, 0.4, 0.4),
+                f"DETECTED_BASE_{i+1}\n({center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f})"
             )
             markers.markers.append(center_label)
         
@@ -375,7 +390,7 @@ class CoordinateProcessor(Node):
         Remove outliers using 2D coordinate analysis with IQR method.
         
         Args:
-            positions (np.array): Array of [x, y] positions
+            positions (np.array): Array of [x, y, z] positions
             
         Returns:
             np.array: Filtered positions without outliers
@@ -383,7 +398,7 @@ class CoordinateProcessor(Node):
         if len(positions) < 4:
             return positions
             
-        # Apply IQR outlier detection for both X and Y coordinates
+        # Apply IQR outlier detection for X and Y coordinates (ignore Z for outlier detection)
         x_coords = positions[:, 0]
         y_coords = positions[:, 1]
         
@@ -412,31 +427,71 @@ class CoordinateProcessor(Node):
 
     def absolute_position_callback(self, msg):
         """
-        Process incoming absolute position messages.
+        Process incoming absolute position messages with frame-based grouping.
 
-        Filters out positions too close to the initial base and adds valid
-        position measurements to the positions list for later clustering and processing.
+        Groups detections that arrive within a short time window (same frame)
+        and processes them together to eliminate temporal drift in clustering.
 
         Args:
             msg (geometry_msgs.msg.Point): Absolute position message
         """
         try:
+            current_time = self.get_clock().now().nanoseconds / 1e9  # Convert to seconds
+            
             # Filter out positions too close to initial base
             if self.is_near_initial_base(msg.x, msg.y):
                 distance_to_origin = np.sqrt(msg.x**2 + msg.y**2)
                 self.get_logger().info(f"Filtering out position near initial base: ({msg.x:.3f}, {msg.y:.3f}) - distance: {distance_to_origin:.3f}m < {INITIAL_BASE_EXCLUSION_RADIUS:.3f}m")
                 return
-                
-            position = [msg.x, msg.y]
-            self.positions_list.append(position)
-            self.get_logger().info(f"Received and accepted remote base position: ({msg.x:.3f}, {msg.y:.3f})")
             
-            if len(self.positions_list) >= self.expected_bases:
-                self.process_positions()
+            # Check if this detection is part of the current frame or a new frame
+            time_since_last = current_time - self.last_detection_time
+            
+            if time_since_last > self.frame_timeout and self.frame_detections:
+                # Process previous frame's detections
+                self.get_logger().info(f"Processing frame with {len(self.frame_detections)} detections (time gap: {time_since_last:.3f}s)")
+                self.process_frame_detections()
+                self.frame_detections = []
+            
+            # Add current detection to frame
+            position = [msg.x, msg.y, msg.z]
+            self.frame_detections.append(position)
+            self.last_detection_time = current_time
+            
+            self.get_logger().info(f"Added detection to frame: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f}) - frame size: {len(self.frame_detections)}")
+            
+            # Create a timer to process the frame if no more detections arrive
+            self.create_timer(self.frame_timeout, self.process_frame_timeout)
                 
         except Exception as e:
             self.get_logger().error(f"Error in absolute_position_callback: {e}")
             traceback.print_exc()
+
+    def process_frame_timeout(self):
+        """
+        Process accumulated frame detections when timeout is reached.
+        """
+        if self.frame_detections:
+            self.get_logger().info(f"Frame timeout reached - processing {len(self.frame_detections)} detections")
+            self.process_frame_detections()
+            self.frame_detections = []
+
+    def process_frame_detections(self):
+        """
+        Process detections from a single frame together.
+        """
+        if not self.frame_detections:
+            return
+            
+        # Add all frame detections to positions list
+        for position in self.frame_detections:
+            self.positions_list.append(position)
+            
+        self.get_logger().info(f"Added {len(self.frame_detections)} detections from frame. Total positions: {len(self.positions_list)}")
+        
+        # Check if we have enough positions to process
+        if len(self.positions_list) >= self.expected_bases:
+            self.process_positions()
 
     def process_positions(self):
         """
@@ -457,7 +512,7 @@ class CoordinateProcessor(Node):
             )
             return
 
-        positions_array = np.array(self.positions_list)
+        positions_array = np.array(self.positions_list)  # Now contains [x, y, z] data
         
         # Remove outliers before clustering
         self.get_logger().info(f"Processing {len(positions_array)} positions with outlier detection")
@@ -472,10 +527,13 @@ class CoordinateProcessor(Node):
         cluster_labels = None
         
         try:
+            # Extract 2D coordinates for clustering (x, y only)
+            positions_2d = filtered_positions[:, :2]
+            
             if self.use_dbscan:
                 # Use DBSCAN clustering (more robust to outliers)
                 dbscan = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples)
-                cluster_labels = dbscan.fit_predict(filtered_positions)
+                cluster_labels = dbscan.fit_predict(positions_2d)
                 
                 # Get unique cluster centers (excluding noise points labeled as -1)
                 unique_labels = set(cluster_labels)
@@ -488,11 +546,13 @@ class CoordinateProcessor(Node):
                     self.get_logger().warn("No valid clusters found by DBSCAN")
                     return
                     
-                # Calculate cluster centers
+                # Calculate cluster centers with average Z values
                 cluster_centers = []
                 for label in unique_labels:
                     cluster_points = filtered_positions[cluster_labels == label]
-                    center = np.mean(cluster_points, axis=0)
+                    center_2d = np.mean(cluster_points[:, :2], axis=0)  # Average x, y
+                    center_z = np.mean(cluster_points[:, 2], axis=0)    # Average z
+                    center = [center_2d[0], center_2d[1], center_z]
                     cluster_centers.append(center)
                     
                 self.unique_positions = cluster_centers
@@ -502,8 +562,19 @@ class CoordinateProcessor(Node):
                 # Use K-means clustering
                 n_clusters = min(self.expected_bases, len(filtered_positions))
                 kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-                kmeans.fit(filtered_positions)
-                self.unique_positions = kmeans.cluster_centers_.tolist()
+                kmeans.fit(positions_2d)
+                
+                # Calculate average Z values for each cluster
+                cluster_centers = []
+                cluster_labels = kmeans.predict(positions_2d)
+                for i in range(n_clusters):
+                    cluster_points = filtered_positions[cluster_labels == i]
+                    center_2d = kmeans.cluster_centers_[i]
+                    center_z = np.mean(cluster_points[:, 2], axis=0) if len(cluster_points) > 0 else 0.0
+                    center = [center_2d[0], center_2d[1], center_z]
+                    cluster_centers.append(center)
+                
+                self.unique_positions = cluster_centers
                 self.get_logger().info(f"K-means clustering with {n_clusters} clusters")
 
             # Sort positions by distance from origin (0,0,0) - closest first
@@ -516,19 +587,19 @@ class CoordinateProcessor(Node):
 
             for i, pos in enumerate(self.unique_positions):
                 distance_from_origin = np.sqrt(pos[0]**2 + pos[1]**2)
-                self.get_logger().info(f"Position {i+1}: ({pos[0]:.3f}, {pos[1]:.3f}) - distance: {distance_from_origin:.3f}m")
+                self.get_logger().info(f"Position {i+1}: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) - distance: {distance_from_origin:.3f}m")
                 
                 pose = Pose()
                 pose.position.x = pos[0]
                 pose.position.y = pos[1]
-                pose.position.z = 0.0
+                pose.position.z = pos[2] # Use the altitude from the position
 
-                new_setpoint = [pos[0], pos[1], -1.5]
+                new_setpoint = [pos[0], pos[1], pos[2]] # Store [x, y, z]
                 new_setpoints.append(new_setpoint)
                 pose_array.poses.append(pose)
 
             self.unique_positions_publisher.publish(pose_array)
-            self.get_logger().info(f"List of unique positions: {[f'({pos[0]:.3f}, {pos[1]:.3f})' for pos in self.unique_positions]}")
+            self.get_logger().info(f"List of unique positions: {[f'({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})' for pos in self.unique_positions]}")
             self.get_logger().info(f"Published {len(self.unique_positions)} unique positions.")
             
             # Publish visual markers
@@ -546,7 +617,7 @@ class CoordinateProcessor(Node):
         Calculate accuracy metrics comparing detected cluster centers with ground truth.
         
         Args:
-            cluster_centers (list): Detected cluster center positions
+            cluster_centers (list): Detected cluster center positions [x, y, z]
             
         Returns:
             dict: Accuracy metrics including distances and matches
@@ -554,20 +625,21 @@ class CoordinateProcessor(Node):
         if not cluster_centers or not self.ground_truth_bases:
             return {}
             
-        # Convert to numpy arrays for easier calculation
-        detected = np.array(cluster_centers)
-        ground_truth = np.array(self.ground_truth_bases)
+        # Convert to numpy arrays for easier calculation (use only x,y for distance)
+        detected = np.array([[pos[0], pos[1]] for pos in cluster_centers])
+        ground_truth = np.array([[pos[0], pos[1]] for pos in self.ground_truth_bases])
         
         # Calculate distance matrix between all detected and ground truth points
         distances = []
         matches = []
         
-        for i, gt_pos in enumerate(ground_truth):
+        for i, gt_pos in enumerate(self.ground_truth_bases):
             min_distance = float('inf')
             closest_detected_idx = -1
             
-            for j, det_pos in enumerate(detected):
-                distance = np.sqrt((gt_pos[0] - det_pos[0])**2 + (gt_pos[1] - det_pos[1])**2)
+            for j, cluster_pos in enumerate(cluster_centers):
+                # Calculate 2D distance (x, y only)
+                distance = np.sqrt((gt_pos[0] - cluster_pos[0])**2 + (gt_pos[1] - cluster_pos[1])**2)
                 if distance < min_distance:
                     min_distance = distance
                     closest_detected_idx = j
@@ -598,10 +670,10 @@ class CoordinateProcessor(Node):
             gt_pos = self.ground_truth_bases[gt_idx]
             if det_idx >= 0:
                 det_pos = cluster_centers[det_idx]
-                self.get_logger().info(f"BASE_{gt_idx+1} ({gt_pos[0]:.2f}, {gt_pos[1]:.2f}) -> "
-                                     f"Detected ({det_pos[0]:.2f}, {det_pos[1]:.2f}) | Error: {distance:.3f}m")
+                self.get_logger().info(f"BASE_{gt_idx+1} ({gt_pos[0]:.2f}, {gt_pos[1]:.2f}, {gt_pos[2]:.2f}) -> "
+                                     f"Detected ({det_pos[0]:.2f}, {det_pos[1]:.2f}, {det_pos[2]:.2f}) | Error: {distance:.3f}m")
             else:
-                self.get_logger().info(f"BASE_{gt_idx+1} ({gt_pos[0]:.2f}, {gt_pos[1]:.2f}) -> No detection found")
+                self.get_logger().info(f"BASE_{gt_idx+1} ({gt_pos[0]:.2f}, {gt_pos[1]:.2f}, {gt_pos[2]:.2f}) -> No detection found")
         
         return {
             'avg_distance': avg_distance,

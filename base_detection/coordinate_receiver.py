@@ -205,49 +205,56 @@ class CoordinateReceiver(Node):
         """
         Process detected base coordinates and calculate real-world positions.
 
-        This method:
-        1. Validates the bounding box dimensions
-        2. Calculates the midpoint in image coordinates
-        3. Auto-detects RGB image dimensions and calculates scaling factors
-        4. Transforms RGB coordinates to depth coordinate space
-        5. Retrieves depth information using transformed coordinates
-        6. Transforms image coordinates to real-world coordinates
-        7. Applies necessary corrections and transformations
-        8. Publishes both relative (delta) and absolute positions
+        This method now handles batched detections from a single frame:
+        1. Parses batched detection data (groups of 5: x1,y1,x2,y2,score)
+        2. Processes all detections with the same timestamp
+        3. Calculates real-world positions for each detection
+        4. Publishes all positions from the frame
 
         Args:
-            msg (std_msgs.msg.Float32MultiArray): Array containing bounding box coordinates
-                [x1, y1, x2, y2] where (x1,y1) is the top-left corner and (x2,y2) is the
-                bottom-right corner of the detected base
+            msg (std_msgs.msg.Float32MultiArray): Array containing batched bounding box coordinates
+                Format: [x1,y1,x2,y2,score, x1,y1,x2,y2,score, ...] for multiple detections
 
         Note:
-            Implements robust coordinate transformation that:
-            - Auto-detects RGB image dimensions from coordinate ranges
-            - Calculates precise scaling factors between RGB and depth resolutions
-            - Eliminates coordinate clamping for improved accuracy
-            - Provides detailed logging for debugging resolution mismatches
-            - Ensures vehicle position-based absolute coordinate calculation
+            Batched processing ensures all detections from the same frame are processed
+            simultaneously, eliminating temporal drift in clustering.
         """
         try:
-            # Unpack coordinates
-            x1, y1, x2, y2 = msg.data
-            self.get_logger().info(f"Received coordinates: p1=({x1:.3f}, {y1:.3f}), p2=({x2:.3f}, {y2:.3f})")
+            # Parse batched detections (groups of 5: x1,y1,x2,y2,score)
+            if len(msg.data) % 5 != 0:
+                self.get_logger().warning(f"Invalid detection data length: {len(msg.data)} (should be multiple of 5)")
+                return
+                
+            num_detections = len(msg.data) // 5
+            self.get_logger().info(f"Processing {num_detections} detections from single frame")
+            
+            # Store all positions from this frame with same timestamp
+            frame_positions = []
+            current_time = self.get_clock().now()
+            
+            for i in range(num_detections):
+                idx = i * 5
+                x1, y1, x2, y2, score = msg.data[idx:idx+5]
+                
+                self.get_logger().info(f"Detection {i+1}: p1=({x1:.3f}, {y1:.3f}), p2=({x2:.3f}, {y2:.3f}), score={score:.3f}")
 
-            # Calculate bounding box dimensions
-            bbox_width = abs(x2 - x1)
-            bbox_height = abs(y2 - y1)
+                # Calculate bounding box dimensions
+                bbox_width = abs(x2 - x1)
+                bbox_height = abs(y2 - y1)
 
-            # Validate bounding box shape
-            aspect_ratio = (
-                bbox_width / bbox_height if bbox_height != 0 else float("inf")
-            )
-            tolerance = 0.15
-            if abs(aspect_ratio - 1) <= tolerance:
+                # Validate bounding box shape
+                aspect_ratio = (
+                    bbox_width / bbox_height if bbox_height != 0 else float("inf")
+                )
+                tolerance = 0.15
+                if abs(aspect_ratio - 1) > tolerance:
+                    self.get_logger().info(f"Detection {i+1}: Bounding box is not approximately square. Ignoring this detection.")
+                    continue
 
                 # cálculo do centro da bounding‐box
                 mid_x_rgb = int((x1 + x2) / 2)
                 mid_y_rgb = int((y1 + y2) / 2)
-                self.get_logger().info(f"Midpoint of the bounding box (RGB): ({mid_x_rgb:.3f}, {mid_y_rgb:.3f})")
+                self.get_logger().info(f"Detection {i+1}: Midpoint (RGB): ({mid_x_rgb:.3f}, {mid_y_rgb:.3f})")
 
                 # busca depth_value, usando valor padrão se latest_depth for None ou inválido
                 if self.latest_depth is not None:
@@ -280,23 +287,29 @@ class CoordinateReceiver(Node):
                     mid_x_depth = int(mid_x_rgb * scale_x)
                     mid_y_depth = int(mid_y_rgb * scale_y)
                     
-                    self.get_logger().info(f"Transformed coordinates: RGB({mid_x_rgb}, {mid_y_rgb}) -> Depth({mid_x_depth}, {mid_y_depth})")
+                    self.get_logger().info(f"Detection {i+1}: Transformed coordinates: RGB({mid_x_rgb}, {mid_y_rgb}) -> Depth({mid_x_depth}, {mid_y_depth})")
                     
                     # Validate transformed coordinates are within depth image bounds
                     if (mid_x_depth < 0 or mid_x_depth >= depth_width or 
                         mid_y_depth < 0 or mid_y_depth >= depth_height):
-                        self.get_logger().error(f"Transformed coordinates ({mid_x_depth}, {mid_y_depth}) are outside depth image bounds ({depth_width}x{depth_height}). This indicates a significant resolution mismatch or calibration issue.")
-                        return
+                        self.get_logger().error(f"Detection {i+1}: Transformed coordinates ({mid_x_depth}, {mid_y_depth}) are outside depth image bounds ({depth_width}x{depth_height}).")
+                        continue
 
                     # Get and validate depth value
                     depth_value = self.latest_depth[mid_y_depth, mid_x_depth]
                     if np.isnan(depth_value) or depth_value <= 0:
-                        self.get_logger().warning(f"Invalid depth value at ({mid_x_depth:.3f}, {mid_y_depth:.3f}): {depth_value:.3f}")
-                        return
+                        self.get_logger().warning(f"Detection {i+1}: Invalid depth value at ({mid_x_depth:.3f}, {mid_y_depth:.3f}): {depth_value:.3f}")
+                        continue
 
                     # Convert depth to meters
                     z = depth_value / 1000.0
-                    self.get_logger().info(f"Depth at center: {z:.3f} meters")
+                    self.get_logger().info(f"Detection {i+1}: Depth at center: {z:.3f} meters")
+
+                    # Calculate the real altitude of the base relative to the ground
+                    base_altitude_relative_to_drone = -z  # Convert camera distance to altitude offset
+                    base_ground_altitude = self.current_altitude + base_altitude_relative_to_drone
+                    
+                    self.get_logger().info(f"Detection {i+1}: Base altitude calculation: drone_alt={self.current_altitude:.3f}m, depth={z:.3f}m, base_ground_alt={base_ground_altitude:.3f}m")
 
                     delta_x = (mid_x_depth - CX_DEPTH) * z / FX_DEPTH if FX_DEPTH != 0 else 0
                     delta_y = (mid_y_depth - CY_DEPTH) * z / FY_DEPTH if FY_DEPTH != 0 else 0
@@ -306,88 +319,91 @@ class CoordinateReceiver(Node):
                     delta_x -= BIAS_X 
                     delta_y -= BIAS_Y 
 
-                    self.get_logger().info(f"Delta real (x,y): ({delta_x:.3f}, {delta_y:.3f}) meters")
+                    self.get_logger().info(f"Detection {i+1}: Delta real (x,y): ({delta_x:.3f}, {delta_y:.3f}) meters")
                     
-                    # Publish relative coordinates (delta)
-                    delta_point = Point()
-                    delta_point.x = delta_x
-                    delta_point.y = delta_y
-                    delta_point.z = 0.0
-                    self.delta_publisher.publish(delta_point)
-                    
-                    # Calculate and publish absolute coordinates
-                    # Apply rotation based on vehicle yaw (heading)
+                    # Calculate absolute coordinates
                     cos_yaw = np.cos(self.current_yaw)
                     sin_yaw = np.sin(self.current_yaw)
                     
                     # Transform relative coordinates to global frame
-                    # Note: In NED frame, X is North, Y is East
                     global_x = self.current_x + (delta_x * cos_yaw - delta_y * sin_yaw)
                     global_y = self.current_y + (delta_x * sin_yaw + delta_y * cos_yaw)
                     
-                    self.get_logger().info(f"Vehicle position (x,y): ({self.current_x:.3f}, {self.current_y:.3f}) meters, yaw: {self.current_yaw:.3f} radians")
-                    self.get_logger().info(f"Absolute position (x,y): ({global_x:.3f}, {global_y:.3f}) meters")
+                    self.get_logger().info(f"Detection {i+1}: Absolute position (x,y): ({global_x:.3f}, {global_y:.3f}) meters")
                     
-                    # Filter out positions too close to initial base
-                    if self.is_near_initial_base(global_x, global_y):
-                        distance_to_origin = np.sqrt(global_x**2 + global_y**2)
-                        self.get_logger().info(f"Base detected near initial position (distance: {distance_to_origin:.3f}m < {INITIAL_BASE_EXCLUSION_RADIUS:.3f}m). Filtering out to focus on remote bases.")
-                        # Still publish relative coordinates for debugging
-                        delta_point = Point()
-                        delta_point.x = delta_x
-                        delta_point.y = delta_y
-                        delta_point.z = 0.0
-                        self.delta_publisher.publish(delta_point)
-                        return
-                    
-                    # Publish absolute coordinates (only for bases away from initial position)
-                    absolute_point = Point()
-                    absolute_point.x = global_x
-                    absolute_point.y = global_y
-                    absolute_point.z = 0.0
-                    self.absolute_publisher.publish(absolute_point)
-                    self.get_logger().info(f"Published absolute position for remote base: ({global_x:.3f}, {global_y:.3f})")
-                    
-                    # Also publish relative coordinates for compatibility
-                    delta_point = Point()
-                    delta_point.x = delta_x
-                    delta_point.y = delta_y
-                    delta_point.z = 0.0
-                    self.delta_publisher.publish(delta_point)
+                    # Store this detection's position data
+                    frame_positions.append({
+                        'delta': (delta_x, delta_y, base_ground_altitude),
+                        'absolute': (global_x, global_y, base_ground_altitude),
+                        'score': score,
+                        'near_initial': self.is_near_initial_base(global_x, global_y)
+                    })
                     
                 else:
-                    self.get_logger().warning(
-                        "No depth data available. Using default for simulation."
-                    )
+                    self.get_logger().warning(f"Detection {i+1}: No depth data available. Using default for simulation.")
                     depth_value = np.float32(-0.4)
+                    z = depth_value / 1000.0
+                    
+                    # Calculate the real altitude of the base (fallback case)
+                    base_altitude_relative_to_drone = -z
+                    base_ground_altitude = self.current_altitude + base_altitude_relative_to_drone
 
-                # conversão para metros
-                z = depth_value / 1000.0
+                    # cálculo de delta_x e delta_y
+                    delta_x = ((mid_x_rgb - CX_DEPTH) * z / FX_DEPTH) if FX_DEPTH != 0 else 0
+                    delta_y = ((mid_y_rgb - CY_DEPTH) * z / FY_DEPTH) if FY_DEPTH != 0 else 0
 
-                # cálculo de delta_x e delta_y
-                delta_x = ((mid_x_rgb - CX_DEPTH) * z / FX_DEPTH) if FX_DEPTH != 0 else 0
-                delta_y = ((mid_y_rgb - CY_DEPTH) * z / FY_DEPTH) if FY_DEPTH != 0 else 0
+                    # aplica correções de baseline e bias
+                    delta_x += BASELINE - BIAS_X
+                    delta_y -= BIAS_Y
 
-                # aplica correções de baseline e bias
-                delta_x += BASELINE - BIAS_X
-                delta_y -= BIAS_Y
+                    self.get_logger().info(f"Detection {i+1}: Delta real x,y (fallback): ({delta_x:.3f}, {delta_y:.3f}) meters")
+                    
+                    # Calculate absolute coordinates (fallback)
+                    cos_yaw = np.cos(self.current_yaw)
+                    sin_yaw = np.sin(self.current_yaw)
+                    global_x = self.current_x + (delta_x * cos_yaw - delta_y * sin_yaw)
+                    global_y = self.current_y + (delta_x * sin_yaw + delta_y * cos_yaw)
+                    
+                    # Store this detection's position data (fallback)
+                    frame_positions.append({
+                        'delta': (delta_x, delta_y, base_ground_altitude),
+                        'absolute': (global_x, global_y, base_ground_altitude),
+                        'score': score,
+                        'near_initial': self.is_near_initial_base(global_x, global_y)
+                    })
 
-                self.get_logger().info(
-                    f"Delta real x,y: ({delta_x:.3f}, {delta_y:.3f}) meters"
-                )
-
-                # publica resultado
+            # Publish all positions from this frame
+            remote_bases_count = 0
+            for pos_data in frame_positions:
+                delta_x, delta_y, base_ground_altitude = pos_data['delta']
+                global_x, global_y, _ = pos_data['absolute']
+                
+                # Always publish relative coordinates for debugging
                 delta_point = Point()
                 delta_point.x = delta_x
                 delta_point.y = delta_y
-                delta_point.z = 0.0
+                delta_point.z = base_ground_altitude
                 self.delta_publisher.publish(delta_point)
-            else:
-                self.get_logger().info(
-                    "Bounding box is not approximately square. Ignoring this detection."
-                )
+                
+                # Only publish absolute coordinates for remote bases
+                if not pos_data['near_initial']:
+                    absolute_point = Point()
+                    absolute_point.x = global_x
+                    absolute_point.y = global_y
+                    absolute_point.z = base_ground_altitude
+                    self.absolute_publisher.publish(absolute_point)
+                    remote_bases_count += 1
+                else:
+                    distance_to_origin = np.sqrt(global_x**2 + global_y**2)
+                    self.get_logger().info(f"Base detected near initial position (distance: {distance_to_origin:.3f}m). Filtering out from absolute positions.")
+            
+            self.get_logger().info(f"Published {len(frame_positions)} delta positions and {remote_bases_count} remote absolute positions from frame")
+                    
         except ValueError as ve:
             self.get_logger().error(f"Value error in listener_callback: {ve}")
+            traceback.print_exc()
+        except Exception as e:
+            self.get_logger().error(f"Unexpected error in listener_callback: {e}")
             traceback.print_exc()
 
 

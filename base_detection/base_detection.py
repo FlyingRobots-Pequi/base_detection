@@ -101,7 +101,8 @@ class ImageInferencer(Node):
         1. Converts ROS image message to OpenCV format
         2. Applies HSV color filtering
         3. Runs YOLO inference on filtered image
-        4. Publishes detection results and visualization
+        4. Collects all valid detections from the frame
+        5. Publishes all detections as a single batch message
 
         Args:
             data (sensor_msgs.msg.Image): Input RGB image from camera
@@ -125,68 +126,45 @@ class ImageInferencer(Node):
         # Run YOLO inference
         results_fly = self.model(result)[0]
 
+        # Collect all valid detections from this frame
+        frame_detections = []
+        
         for result_fly in results_fly.boxes.data.tolist():
-            self.x1, self.y1, self.x2, self.y2, score, class_id = result_fly
+            x1, y1, x2, y2, score, class_id = result_fly
             if score > self.threshold_helmet:
-                # Draw detection visualization
-                    cv2.rectangle(result, 
-                                (int(self.x1), int(self.y1)), 
-                                (int(self.x2), int(self.y2)), 
-                                (0, 255, 0), 4)
-                    
-                    # Calcular centro corretamente como inteiros
-                    center_x = int((self.x1 + self.x2) / 2)
-                    center_y = int((self.y1 + self.y2) / 2)
-                    cv2.circle(result, (center_x, center_y), 5, (0, 0, 255), -1)
-                    
-                    cv2.putText(result, 
-                            f"{score:.2f}", 
-                            (int(self.x1), int(self.y1) - 10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 
-                            0.7, 
-                            (0, 255, 0), 
-                            2, 
-                            cv2.LINE_AA)
+                # Store detection data
+                frame_detections.append([x1, y1, x2, y2, score])
                 
-                    # Publish detection coordinates
-                    coord_msg = Float32MultiArray()
-                    coord_msg.data = [self.x1, self.y1, self.x2, self.y2]
-                    self.coord_publisher.publish(coord_msg)
-
-            if score > self.threshold_helmet:
                 # Draw detection visualization
-                cv2.rectangle(
-                    result,
-                    (int(self.x1), int(self.y1)),
-                    (int(self.x2), int(self.y2)),
-                    (0, 255, 0),
-                    4,
-                )
+                cv2.rectangle(result, 
+                            (int(x1), int(y1)), 
+                            (int(x2), int(y2)), 
+                            (0, 255, 0), 4)
+                
+                # Calculate center for visualization
+                center_x = int((x1 + x2) / 2)
+                center_y = int((y1 + y2) / 2)
+                cv2.circle(result, (center_x, center_y), 5, (0, 0, 255), -1)
+                
+                cv2.putText(result, 
+                        f"{score:.2f}", 
+                        (int(x1), int(y1) - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 
+                        0.7, 
+                        (0, 255, 0), 
+                        2, 
+                        cv2.LINE_AA)
 
-                cv2.circle(
-                    result,
-                    (int((self.x1 + self.x2) / 2), int((self.y1 + self.y2) / 2)),
-                    5,
-                    (0, 0, 255),
-                    -1,
-                )
-
-                cv2.putText(
-                    result,
-                    f"{score:.4f}",
-                    (int(self.x1), int(self.y1)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.3,
-                    (0, 255, 0),
-                    3,
-                    cv2.LINE_AA,
-                )
-
-                # Publish detection coordinates
-                coord_msg = Float32MultiArray()
-                coord_msg.data = [self.x1, self.y1, self.x2, self.y2]
-                self.coord_publisher.publish(coord_msg)
-
+        # Publish all detections from this frame as a single batched message
+        if frame_detections:
+            # Flatten the list: [x1,y1,x2,y2,score, x1,y1,x2,y2,score, ...]
+            coord_msg = Float32MultiArray()
+            coord_msg.data = [item for detection in frame_detections for item in detection]
+            self.coord_publisher.publish(coord_msg)
+            
+            self.get_logger().info(f"Published {len(frame_detections)} detections in batch")
+        
+        # Publish visualization image
         inferred_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
         self.publisher_.publish(inferred_image_msg)
 
