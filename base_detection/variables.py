@@ -42,6 +42,11 @@ D455_DEPTH_WIDTH = 1280   # Depth stream resolution width
 D455_DEPTH_HEIGHT = 720   # Depth stream resolution height
 
 # Base filtering constants
-INITIAL_BASE_EXCLUSION_RADIUS = 0.7  # meters - radius around (0,0) to exclude detections
+INITIAL_BASE_EXCLUSION_RADIUS = 1.5  # meters - radius around (0,0) to exclude detections (aumentado de 0.7)
 INITIAL_BASE_X = 0.0                 # X coordinate of initial base position
 INITIAL_BASE_Y = 0.0                 # Y coordinate of initial base position
+
+# Advanced filtering constants
+MIN_DISTANCE_BETWEEN_BASES = 1.0     # meters - minimum distance between detected bases
+MAX_DETECTIONS_STORED = 75           # maximum number of detections to store before clustering (aumentado para permitir mais detecções)
+DETECTION_TIMEOUT = 45.0             # seconds - timeout to trigger clustering (aumentado para dar mais tempo para encontrar as 5 bases)

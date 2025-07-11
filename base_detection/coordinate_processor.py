@@ -37,7 +37,10 @@ from base_detection.variables import (
     UNIQUE_POSITIONS_TOPIC,
     INITIAL_BASE_EXCLUSION_RADIUS,
     INITIAL_BASE_X,
-    INITIAL_BASE_Y
+    INITIAL_BASE_Y,
+    MIN_DISTANCE_BETWEEN_BASES,
+    MAX_DETECTIONS_STORED,
+    DETECTION_TIMEOUT
 )
 
 
@@ -92,18 +95,23 @@ class CoordinateProcessor(Node):
 
         self.positions_list = []  # List of [x, y, z] positions with altitude
         self.unique_positions = []  # List of unique base positions with altitudes
-        self.expected_bases = 5
+        self.expected_bases = 5  # Total de 5 bases na arena (corrigido de volta)
         
         # Frame-based detection grouping
         self.frame_detections = []  # Temporary storage for detections from current frame
         self.last_detection_time = 0.0
         self.frame_timeout = 0.1  # 100ms timeout to group detections from same frame
         
+        # Advanced detection control
+        self.first_detection_time = None  # Time of first detection
+        self.last_clustering_time = 0.0   # Time of last clustering attempt
+        self.clustering_min_interval = 10.0  # Minimum seconds between clustering attempts (aumentado para dar mais tempo de exploração)
+        
         # Outlier detection parameters
-        self.use_dbscan = False  # Use DBSCAN for better outlier handling
+        self.use_dbscan = True  # Use DBSCAN for better outlier handling (mudado para True)
         self.outlier_threshold = 1.5  # IQR multiplier for outlier detection
-        self.dbscan_eps = 0.9  # DBSCAN epsilon parameter (max distance between points in cluster)
-        self.dbscan_min_samples = 3  # DBSCAN minimum samples per cluster
+        self.dbscan_eps = 1.5  # DBSCAN epsilon parameter (aumentado para 1.5 para agrupar melhor as 5 bases)
+        self.dbscan_min_samples = 3  # DBSCAN minimum samples per cluster (voltou para 3 para ser mais rigoroso)
         
         # Ground truth base positions (now including Z for better visualization)
         self.ground_truth_bases = [
@@ -116,6 +124,16 @@ class CoordinateProcessor(Node):
         
         # Marker ID counter
         self.marker_id_counter = 0
+
+        # Setup visualization and processing
+        self.get_logger().info("CoordinateProcessor initialized for 5-base detection with improved clustering")
+        self.get_logger().info(f"Configuration: DBSCAN={self.use_dbscan}, eps={self.dbscan_eps}, min_samples={self.dbscan_min_samples}")
+        self.get_logger().info(f"Filters: Initial base exclusion={INITIAL_BASE_EXCLUSION_RADIUS}m, Min base distance={MIN_DISTANCE_BETWEEN_BASES}m")
+        self.get_logger().info(f"Limits: Max detections={MAX_DETECTIONS_STORED}, Detection timeout={DETECTION_TIMEOUT}s")
+        self.get_logger().info(f"Expected bases: {self.expected_bases}, Clustering interval: {self.clustering_min_interval}s")
+        
+        # Create timer for periodic clustering check
+        self.create_timer(10.0, self.periodic_clustering_check)  # Check every 10s (aumento do intervalo)
 
     def create_marker(self, marker_type, position, color, scale, text="", marker_id=None):
         """
@@ -351,6 +369,53 @@ class CoordinateProcessor(Node):
         distance = np.sqrt((x - INITIAL_BASE_X)**2 + (y - INITIAL_BASE_Y)**2)
         return distance <= INITIAL_BASE_EXCLUSION_RADIUS
 
+    def is_too_close_to_existing(self, x, y):
+        """
+        Check if a new detection is too close to already stored detections.
+        
+        Args:
+            x (float): X coordinate to check
+            y (float): Y coordinate to check
+            
+        Returns:
+            bool: True if position is too close to existing detections
+        """
+        for pos in self.positions_list:
+            distance = np.sqrt((x - pos[0])**2 + (y - pos[1])**2)
+            if distance < MIN_DISTANCE_BETWEEN_BASES:
+                return True
+        return False
+
+    def filter_duplicate_detections(self):
+        """
+        Remove duplicate detections that are too close to each other.
+        Keeps the first detection in each cluster.
+        """
+        if len(self.positions_list) < 2:
+            return
+            
+        filtered_positions = []
+        
+        for pos in self.positions_list:
+            # Check if this position is too close to any already filtered position
+            too_close = False
+            for filtered_pos in filtered_positions:
+                distance = np.sqrt((pos[0] - filtered_pos[0])**2 + (pos[1] - filtered_pos[1])**2)
+                if distance < MIN_DISTANCE_BETWEEN_BASES:
+                    too_close = True
+                    break
+            
+            if not too_close:
+                filtered_positions.append(pos)
+        
+        original_count = len(self.positions_list)
+        self.positions_list = filtered_positions
+        removed_count = original_count - len(filtered_positions)
+        
+        if removed_count > 0:
+            self.get_logger().info(f"Filtered out {removed_count} duplicate detections (too close to existing ones)")
+            self.get_logger().info(f"Remaining detections: {len(self.positions_list)}")
+
     def detect_outliers_iqr(self, positions):
         """
         Detect outliers using Interquartile Range (IQR) method.
@@ -441,7 +506,7 @@ class CoordinateProcessor(Node):
             # Filter out positions too close to initial base
             if self.is_near_initial_base(msg.x, msg.y):
                 distance_to_origin = np.sqrt(msg.x**2 + msg.y**2)
-                self.get_logger().info(f"Filtering out position near initial base: ({msg.x:.3f}, {msg.y:.3f}) - distance: {distance_to_origin:.3f}m < {INITIAL_BASE_EXCLUSION_RADIUS:.3f}m")
+                self.get_logger().info(f"❌ Filtering out position near initial base: ({msg.x:.3f}, {msg.y:.3f}) - distance: {distance_to_origin:.3f}m < {INITIAL_BASE_EXCLUSION_RADIUS:.3f}m")
                 return
             
             # Check if this detection is part of the current frame or a new frame
@@ -449,7 +514,7 @@ class CoordinateProcessor(Node):
             
             if time_since_last > self.frame_timeout and self.frame_detections:
                 # Process previous frame's detections
-                self.get_logger().info(f"Processing frame with {len(self.frame_detections)} detections (time gap: {time_since_last:.3f}s)")
+                self.get_logger().info(f"📦 Processing frame with {len(self.frame_detections)} detections (time gap: {time_since_last:.3f}s)")
                 self.process_frame_detections()
                 self.frame_detections = []
             
@@ -458,7 +523,7 @@ class CoordinateProcessor(Node):
             self.frame_detections.append(position)
             self.last_detection_time = current_time
             
-            self.get_logger().info(f"Added detection to frame: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f}) - frame size: {len(self.frame_detections)}")
+            self.get_logger().info(f"✅ Added detection to frame: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f}) - frame size: {len(self.frame_detections)}")
             
             # Create a timer to process the frame if no more detections arrive
             self.create_timer(self.frame_timeout, self.process_frame_timeout)
@@ -478,41 +543,74 @@ class CoordinateProcessor(Node):
 
     def process_frame_detections(self):
         """
-        Process detections from a single frame together.
+        Process detections from a single frame together with improved filtering.
         """
         if not self.frame_detections:
             return
             
-        # Add all frame detections to positions list
-        for position in self.frame_detections:
-            self.positions_list.append(position)
-            
-        self.get_logger().info(f"Added {len(self.frame_detections)} detections from frame. Total positions: {len(self.positions_list)}")
+        current_time = self.get_clock().now().nanoseconds / 1e9
         
-        # Check if we have enough positions to process
+        # Set first detection time if not set
+        if self.first_detection_time is None:
+            self.first_detection_time = current_time
+            
+        # Add frame detections with duplicate filtering
+        new_detections_added = 0
+        for position in self.frame_detections:
+            # Check if too close to existing detections
+            if not self.is_too_close_to_existing(position[0], position[1]):
+                self.positions_list.append(position)
+                new_detections_added += 1
+            else:
+                self.get_logger().debug(f"Skipped duplicate detection: ({position[0]:.3f}, {position[1]:.3f})")
+                
+        self.get_logger().info(f"Added {new_detections_added}/{len(self.frame_detections)} new detections from frame. Total positions: {len(self.positions_list)}")
+        
+        # Trigger clustering based on multiple conditions
+        should_cluster = False
+        clustering_reason = ""
+        
+        # Condition 1: Reached expected number of bases
         if len(self.positions_list) >= self.expected_bases:
+            should_cluster = True
+            clustering_reason = f"reached expected bases ({self.expected_bases})"
+            
+        # Condition 2: Reached maximum stored detections
+        elif len(self.positions_list) >= MAX_DETECTIONS_STORED:
+            should_cluster = True
+            clustering_reason = f"reached max detections ({MAX_DETECTIONS_STORED})"
+            
+        # Condition 3: Timeout since first detection
+        elif (current_time - self.first_detection_time) >= DETECTION_TIMEOUT:
+            should_cluster = True
+            clustering_reason = f"timeout reached ({DETECTION_TIMEOUT:.1f}s since first detection)"
+            
+        # Respect minimum interval between clustering attempts
+        time_since_last_clustering = current_time - self.last_clustering_time
+        
+        if should_cluster and time_since_last_clustering >= self.clustering_min_interval:
+            self.get_logger().info(f"Triggering clustering: {clustering_reason}")
+            self.last_clustering_time = current_time
+            self.filter_duplicate_detections()  # Final cleanup before clustering
             self.process_positions()
+        elif should_cluster:
+            self.get_logger().info(f"Clustering delayed: {clustering_reason}, but waiting for min interval ({time_since_last_clustering:.1f}s < {self.clustering_min_interval:.1f}s)")
 
     def process_positions(self):
         """
-        Process collected positions to identify unique bases.
+        Process collected positions to identify unique bases using improved clustering.
 
-        Uses K-means clustering or DBSCAN to identify unique base positions from
-        collected measurements. Includes outlier detection and removal.
-        Publishes results and saves setpoints to configuration file.
-
-        Note:
-            Requires at least expected_bases number of positions
-            to perform clustering.
+        Uses DBSCAN clustering for better outlier handling and flexible number of clusters.
+        Includes outlier detection and duplicate removal.
         """
         
-        if len(self.positions_list) < self.expected_bases:
+        if len(self.positions_list) < 2:
             self.get_logger().warn(
-                f"Not enough positions collected to perform clustering. Expected {self.expected_bases} positions, but got {len(self.positions_list)}."
+                f"Not enough positions to perform clustering. Need at least 2 positions, but got {len(self.positions_list)}."
             )
             return
 
-        positions_array = np.array(self.positions_list)  # Now contains [x, y, z] data
+        positions_array = np.array(self.positions_list)  # Contains [x, y, z] data
         
         # Remove outliers before clustering
         self.get_logger().info(f"Processing {len(positions_array)} positions with outlier detection")
@@ -531,19 +629,20 @@ class CoordinateProcessor(Node):
             positions_2d = filtered_positions[:, :2]
             
             if self.use_dbscan:
-                # Use DBSCAN clustering (more robust to outliers)
+                # Use DBSCAN clustering (more robust to outliers and finds optimal number of clusters)
                 dbscan = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples)
                 cluster_labels = dbscan.fit_predict(positions_2d)
                 
                 # Get unique cluster centers (excluding noise points labeled as -1)
                 unique_labels = set(cluster_labels)
+                noise_count = 0
                 if -1 in unique_labels:
                     unique_labels.remove(-1)  # Remove noise label
                     noise_count = np.sum(cluster_labels == -1)
                     self.get_logger().info(f"DBSCAN identified {noise_count} noise points")
                 
                 if len(unique_labels) == 0:
-                    self.get_logger().warn("No valid clusters found by DBSCAN")
+                    self.get_logger().warn("No valid clusters found by DBSCAN - all points classified as noise")
                     return
                     
                 # Calculate cluster centers with average Z values
@@ -556,12 +655,12 @@ class CoordinateProcessor(Node):
                     cluster_centers.append(center)
                     
                 self.unique_positions = cluster_centers
-                self.get_logger().info(f"DBSCAN found {len(unique_labels)} clusters")
+                self.get_logger().info(f"DBSCAN found {len(unique_labels)} unique base clusters (noise points: {noise_count})")
                 
             else:
-                # Use K-means clustering
+                # Fallback to K-means clustering
                 n_clusters = min(self.expected_bases, len(filtered_positions))
-                kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
                 kmeans.fit(positions_2d)
                 
                 # Calculate average Z values for each cluster
@@ -580,33 +679,35 @@ class CoordinateProcessor(Node):
             # Sort positions by distance from origin (0,0,0) - closest first
             self.unique_positions.sort(key=lambda pos: np.sqrt(pos[0]**2 + pos[1]**2))
 
-            new_setpoints = []
+            # Create and publish pose array
             pose_array = PoseArray()
             pose_array.header.stamp = self.get_clock().now().to_msg()
             pose_array.header.frame_id = 'map'
 
+            self.get_logger().info("=== DETECTED UNIQUE BASE POSITIONS ===")
             for i, pos in enumerate(self.unique_positions):
                 distance_from_origin = np.sqrt(pos[0]**2 + pos[1]**2)
-                self.get_logger().info(f"Position {i+1}: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) - distance: {distance_from_origin:.3f}m")
+                self.get_logger().info(f"Base {i+1}: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) - distance: {distance_from_origin:.3f}m")
                 
                 pose = Pose()
                 pose.position.x = pos[0]
                 pose.position.y = pos[1]
-                pose.position.z = pos[2] # Use the altitude from the position
-
-                new_setpoint = [pos[0], pos[1], pos[2]] # Store [x, y, z]
-                new_setpoints.append(new_setpoint)
+                pose.position.z = pos[2]
                 pose_array.poses.append(pose)
 
             self.unique_positions_publisher.publish(pose_array)
-            self.get_logger().info(f"List of unique positions: {[f'({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})' for pos in self.unique_positions]}")
-            self.get_logger().info(f"Published {len(self.unique_positions)} unique positions.")
+            self.get_logger().info(f"Published {len(self.unique_positions)} unique base positions.")
             
             # Publish visual markers
             self.publish_visualization_markers(positions_array, filtered_positions, self.unique_positions, cluster_labels)
             
             # Calculate and log detection accuracy
             self.calculate_detection_accuracy(self.unique_positions)
+            
+            # Clear processed positions to allow for new detections
+            self.positions_list.clear()
+            self.first_detection_time = None
+            self.get_logger().info("Cleared processed detections - ready for new exploration data")
             
         except Exception as e:
             self.get_logger().error(f"Error in process_positions: {e}")
@@ -683,6 +784,30 @@ class CoordinateProcessor(Node):
             'detection_rate': detection_rate,
             'matches': matches
         }
+
+    def periodic_clustering_check(self):
+        """
+        Periodically check if clustering should be triggered due to timeout.
+        This is a fallback mechanism to ensure clustering happens even if
+        no new detections arrive for a long time.
+        """
+        if self.first_detection_time is None:
+            return  # No detections yet
+            
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        time_since_first_detection = current_time - self.first_detection_time
+        time_since_last_clustering = current_time - self.last_clustering_time
+
+        if (time_since_first_detection >= DETECTION_TIMEOUT and 
+            time_since_last_clustering >= self.clustering_min_interval and
+            len(self.positions_list) >= 2):
+            
+            self.get_logger().info(f"Periodic check: Timeout reached ({time_since_first_detection:.1f}s since first detection). Triggering clustering.")
+            self.last_clustering_time = current_time
+            self.filter_duplicate_detections()
+            self.process_positions()
+        else:
+            self.get_logger().debug(f"Periodic check: No timeout, first detection time: {self.first_detection_time:.1f}s, current time: {current_time:.1f}s")
 
 
 def main(args=None):
