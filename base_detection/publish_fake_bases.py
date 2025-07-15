@@ -87,69 +87,6 @@ class FakeBasePublisher(Node):
         
         for x, y, z in self.base_positions:
             pose = Pose()#!/bin/bash
-
-set -e
-
-if [ -z "$1" ]; then
-  echo "Usage: $0 <image_name[:tag]>"
-  echo "Example: $0 uav-px4-simulator:v1.2.0"
-  exit 1
-fi
-
-IMAGE_NAME="$1"
-
-# Corrige o diretório para raiz do repositório (com base na localização do script)
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-
-# Checagem: impedir execução fora do diretório raiz do repositório
-if [ "$PWD" != "$ROOT_DIR" ]; then
-  echo "Aviso: este script deve ser executado a partir do diretório raiz do repositório:"
-  echo "  cd $ROOT_DIR"
-  echo "  ./docker/run_docker.sh <image_name[:tag]>"
-  exit 1
-fi
-
-cd "$ROOT_DIR"
-
-# X11 config
-xhost +local:docker
-XAUTH=/tmp/.docker.xauth
-touch $XAUTH
-xauth nlist $DISPLAY | sed -e 's/^..../ffff/' | xauth -f $XAUTH nmerge -
-
-# Caminhos de volume
-HOST_WORK_PATH="$ROOT_DIR/ros_packages"
-CONTAINER_WORK_PATH="/root/ros2_ws/src"
-HOST_DATA_PATH="$ROOT_DIR/shared_folder"
-CONTAINER_DATA_PATH="/root/shared_folder"
-HOST_CONFIG_ENV_PATH="$ROOT_DIR/config.env"
-CONTAINER_CONFIG_ENV_PATH="/etc/config.env"
-HOST_CONFIG_GZBRIDGE_ENV_PATH="$ROOT_DIR/config/gz_bridge.yaml"
-CONTAINER_CONFIG_GZBRIDGE_ENV_PATH="/root/config/gz_bridge.yaml"
-HOST_SCRIPTS_PATH="$ROOT_DIR/scripts/"
-CONTAINER_SCRIPTS_PATH="/root/scripts/"
-
-# Execução do container
-docker run -it \
-  --rm \
-  --name px4_container \
-  --privileged \
-  --user=root \
-  --network=host \
-  --env="DISPLAY=$DISPLAY" \
-  --env="QT_X11_NO_MITSHM=1" \
-  --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
-  --env="XAUTHORITY=$XAUTH" \
-  --volume="$XAUTH:$XAUTH" \
-  --volume="/dev:/dev" \
-  --volume="$HOST_WORK_PATH:$CONTAINER_WORK_PATH:rw" \
-  --volume="$HOST_DATA_PATH:$CONTAINER_DATA_PATH:rw" \
-  --volume="$HOST_CONFIG_ENV_PATH:$CONTAINER_CONFIG_ENV_PATH:rw" \
-  --volume="$HOST_CONFIG_GZBRIDGE_ENV_PATH:$CONTAINER_CONFIG_GZBRIDGE_ENV_PATH:rw" \
-  --volume="$HOST_SCRIPTS_PATH:$CONTAINER_SCRIPTS_PATH:rw" \
-  "$IMAGE_NAME"
-
             pose.position.x = x
             pose.position.y = y
             pose.position.z = z
