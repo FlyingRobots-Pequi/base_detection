@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 ROS2 node to process base detection coordinates with motion compensation.
 
@@ -22,15 +21,15 @@ from rclpy.qos import (
     QoSDurabilityPolicy,
 )
 
-from .variables import (
+from base_detection.variables import (
     DETECTED_COORDINATES_TOPIC,
     DELTA_POINTS_TOPIC,
     ABSOLUTE_POINTS_TOPIC,
     DEPTH_IMAGE_TOPIC,
     VEHICLE_LOCAL_POSITION_TOPIC,
 )
-from .parameters import get_coordinate_receiver_params
-from .utils import assess_motion_stability, calculate_motion_compensation
+from base_detection.parameters import get_coordinate_receiver_params
+from base_detection.utils import calculate_motion_compensation
 
 
 class CoordinateReceiver(Node):

@@ -227,6 +227,7 @@ class CoordinateProcessor(Node):
         for pos in self.unique_positions:
             pose = Pose()
             pose.position.x, pose.position.y, pose.position.z = pos[0], pos[1], 0.0
+            pose.orientation.w = 1.0  # Set default orientation
             pose_array.poses.append(pose)
         self.unique_positions_publisher.publish(pose_array)
         self.get_logger().info(
