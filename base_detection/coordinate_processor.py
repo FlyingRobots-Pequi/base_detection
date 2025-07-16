@@ -171,9 +171,11 @@ class CoordinateProcessor(Node):
         if len(self.drone_position_history) > self.max_position_history:
             self.drone_position_history.pop(0)
 
-    def _run_clustering(self, filtered_positions: np.ndarray, n_clusters: int):
+    def _run_clustering(self, filtered_positions: np.ndarray, n_clusters: int, sample_weights: np.ndarray):
         """Runs the appropriate clustering algorithm based on configuration."""
         if self.params.clustering.use_line_based:
+            # Note: The custom line-based clustering does not support weights yet.
+            # We will ignore weights for this method for now.
             movement_direction = self.estimate_drone_movement_direction()
             unique_positions, labels = run_hybrid_line_kmeans(
                 filtered_positions,
@@ -187,7 +189,7 @@ class CoordinateProcessor(Node):
             # Fallback to traditional K-Means
             n_clusters = min(n_clusters, len(filtered_positions))
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            kmeans.fit(filtered_positions)
+            kmeans.fit(filtered_positions, sample_weight=sample_weights)
             unique_positions = kmeans.cluster_centers_.tolist()
             labels = kmeans.labels_
             method = "K-means"
@@ -240,13 +242,13 @@ class CoordinateProcessor(Node):
 
         # Step 1: Filter outliers
         try:
-            positions_2d = positions_array[:, :2]
-            filtered_positions = remove_outliers_2d(
-                positions_2d, self.params.outlier_threshold, self.get_logger()
+            filtered_positions_with_weights = remove_outliers_2d(
+                positions_array, self.params.outlier_threshold, self.get_logger()
             )
-            if len(filtered_positions) < self.params.clustering.min_line_points:
+
+            if len(filtered_positions_with_weights) < self.params.clustering.min_line_points:
                 self.get_logger().info(
-                    f"Waiting for more points after filtering ({len(filtered_positions)}/{self.params.clustering.min_line_points})"
+                    f"Waiting for more points after filtering ({len(filtered_positions_with_weights)}/{self.params.clustering.min_line_points})"
                 )
                 return
         except Exception as e:
@@ -256,8 +258,12 @@ class CoordinateProcessor(Node):
 
         # Step 2: Run clustering
         try:
+            # Separate positions and weights for clustering
+            filtered_positions = filtered_positions_with_weights[:, :2]
+            sample_weights = filtered_positions_with_weights[:, 2]
+
             unique_positions, cluster_labels, method = self._run_clustering(
-                filtered_positions, num_bases_to_find
+                filtered_positions, num_bases_to_find, sample_weights
             )
             # Combine confirmed bases with newly found clusters
             self.unique_positions = self.confirmed_bases + unique_positions

@@ -216,6 +216,10 @@ class CoordinateReceiver(Node):
         )
         is_high_accuracy = pixel_dist < self.params.high_accuracy_pixel_threshold
 
+        # Calculate a normalized weight (0 to 1). 1 is best (center of image).
+        max_dist = np.sqrt(image_center_x**2 + image_center_y**2)
+        weight = max(0.0, 1.0 - (pixel_dist / max_dist))
+
         depth_h, depth_w = self.latest_depth.shape
         mid_x_depth = int(mid_x_rgb * (depth_w / cam.rgb_width))
         mid_y_depth = int(mid_y_rgb * (depth_h / cam.rgb_height))
@@ -254,7 +258,8 @@ class CoordinateReceiver(Node):
         global_x = comp_x + (delta_x * cos_yaw - delta_y * sin_yaw)
         global_y = comp_y + (delta_x * sin_yaw + delta_y * cos_yaw)
 
-        absolute_point = Point(x=global_x, y=global_y, z=comp_z - z)
+        # Use the 'z' field to pass the weight of the detection
+        absolute_point = Point(x=global_x, y=global_y, z=weight)
         delta_point = Point(x=delta_x, y=delta_y, z=comp_z - z)
 
         return absolute_point, delta_point, is_high_accuracy

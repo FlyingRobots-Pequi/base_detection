@@ -3,6 +3,7 @@ from logging import Logger
 from typing import Tuple, List
 from .parameters import ClusteringParams, InitialBaseParams, MotionParams
 from scipy import stats
+from scipy.spatial.transform import Rotation
 
 
 def detect_outliers_iqr(
@@ -30,28 +31,31 @@ def detect_outliers_iqr(
     return mask
 
 
-def remove_outliers_2d(
-    positions: np.ndarray, threshold: float, logger: Logger
-):
+def remove_outliers_2d(points_3d, threshold, logger):
     """
-    Removes outliers from a 2D dataset using Z-score.
+    Removes outliers from a 3D point cloud (x, y, weight) based on the Z-score of the x and y coordinates.
+    Keeps the z-coordinate (weight) associated with the inliers.
     """
-    if positions.ndim != 2 or positions.shape[1] != 2:
-        raise ValueError("Input array must be a 2D array of shape (n, 2).")
-
-    if positions.shape[0] == 0:
-        return positions
-
-    z_scores_x = np.abs(stats.zscore(positions[:, 0]))
-    z_scores_y = np.abs(stats.zscore(positions[:, 1]))
-
-    is_not_outlier = (z_scores_x < threshold) & (z_scores_y < threshold)
-
-    n_outliers = np.sum(~is_not_outlier)
-    if n_outliers > 0:
-        logger.debug(f"Removed {n_outliers} outliers based on Z-score.")
-
-    return positions[is_not_outlier]
+    if len(points_3d) == 0:
+        return np.array([])
+        
+    points_2d = points_3d[:, :2]
+    mean = np.mean(points_2d, axis=0)
+    std = np.std(points_2d, axis=0)
+    
+    # Avoid division by zero if all points are the same
+    std[std == 0] = 1 
+    
+    z_scores = np.abs((points_2d - mean) / std)
+    
+    # Check Z-scores for both x and y dimensions
+    inliers_mask = np.all(z_scores < threshold, axis=1)
+    
+    num_outliers = len(points_3d) - np.sum(inliers_mask)
+    if num_outliers > 0:
+        logger.info(f"Filtered out {num_outliers} outliers based on Z-score.")
+        
+    return points_3d[inliers_mask]
 
 
 def detect_lines_ransac(
