@@ -3,7 +3,6 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-PACKAGE_NAME = 'base_detection'
 NODES_NAMES = ['base_detection', 'coordinate_receiver', 'coordinate_processor']
 
 def generate_launch_description():
@@ -13,7 +12,7 @@ def generate_launch_description():
     )
 
     node_args = dict(
-        package=PACKAGE_NAME,
+        package=NODES_NAMES[0],
         output=LaunchConfiguration('output'),
         respawn=True,
         respawn_delay=1.0

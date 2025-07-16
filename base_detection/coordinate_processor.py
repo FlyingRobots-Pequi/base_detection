@@ -27,6 +27,8 @@ from .variables import (
     ABSOLUTE_POINTS_TOPIC,
     UNIQUE_POSITIONS_TOPIC,
     VEHICLE_LOCAL_POSITION_TOPIC,
+    HIGH_ACCURACY_POINT_TOPIC,
+    CONFIRMED_BASES_TOPIC,
 )
 from .parameters import get_coordinate_processor_params
 from .clustering import run_hybrid_line_kmeans
@@ -52,6 +54,7 @@ class CoordinateProcessor(Node):
 
         self.positions_list = []
         self.unique_positions = []
+        self.confirmed_bases = []
         self.drone_position_history = []
         self.max_position_history = 50
         self.initial_clustering_done = False
@@ -66,6 +69,12 @@ class CoordinateProcessor(Node):
         self.absolute_subscription = self.create_subscription(
             Point, ABSOLUTE_POINTS_TOPIC, self.absolute_position_callback, 10
         )
+        self.high_accuracy_subscription = self.create_subscription(
+            Point,
+            HIGH_ACCURACY_POINT_TOPIC,
+            self.high_accuracy_callback,
+            10,
+        )
         self.local_position_sub = self.create_subscription(
             VehicleLocalPosition,
             VEHICLE_LOCAL_POSITION_TOPIC,
@@ -74,6 +83,9 @@ class CoordinateProcessor(Node):
         )
         self.unique_positions_publisher = self.create_publisher(
             PoseArray, UNIQUE_POSITIONS_TOPIC, 10
+        )
+        self.confirmed_bases_publisher = self.create_publisher(
+            PoseArray, CONFIRMED_BASES_TOPIC, 10
         )
 
         # Timer for periodic processing
@@ -109,6 +121,42 @@ class CoordinateProcessor(Node):
                 f"Filtered out a detection at ({msg.x:.2f}, {msg.y:.2f}) near the initial base."
             )
 
+    def high_accuracy_callback(self, msg: Point):
+        """Callback for high-accuracy detections, which are treated as confirmed bases."""
+        new_base = [msg.x, msg.y]
+
+        # Ignore bases detected near the initial home position (0,0)
+        if self.is_near_initial_base(new_base[0], new_base[1]):
+            self.get_logger().debug(
+                f"Ignoring high-accuracy point {new_base} near initial base."
+            )
+            return
+
+        # Check if this base is too close to an already confirmed base
+        is_duplicate = False
+        for confirmed_base in self.confirmed_bases:
+            distance = np.linalg.norm(np.array(new_base) - np.array(confirmed_base))
+            if distance < self.params.clustering.min_distance_between_bases:
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            self.get_logger().info(f"New confirmed base added at: {new_base}")
+            self.confirmed_bases.append(new_base)
+            self._publish_confirmed_bases() # Publish the updated list
+
+            # Filter out points in positions_list that are close to the new confirmed base
+            radius = self.params.confirmed_base_filter_radius
+            points_to_keep = []
+            for point in self.positions_list:
+                if np.linalg.norm(np.array(point[:2]) - np.array(new_base)) > radius:
+                    points_to_keep.append(point)
+            
+            removed_count = len(self.positions_list) - len(points_to_keep)
+            if removed_count > 0:
+                self.get_logger().info(f"Removed {removed_count} nearby points from processing list.")
+            self.positions_list = points_to_keep
+
     def vehicle_local_position_callback(self, msg: VehicleLocalPosition):
         """Stores vehicle position history to estimate movement direction."""
         current_position = [msg.x, msg.y]
@@ -123,21 +171,21 @@ class CoordinateProcessor(Node):
         if len(self.drone_position_history) > self.max_position_history:
             self.drone_position_history.pop(0)
 
-    def _run_clustering(self, filtered_positions: np.ndarray):
+    def _run_clustering(self, filtered_positions: np.ndarray, n_clusters: int):
         """Runs the appropriate clustering algorithm based on configuration."""
         if self.params.clustering.use_line_based:
             movement_direction = self.estimate_drone_movement_direction()
             unique_positions, labels = run_hybrid_line_kmeans(
                 filtered_positions,
                 self.params.clustering,
-                self.params.expected_bases,
+                n_clusters,
                 movement_direction,
                 self.get_logger(),
             )
             method = "hybrid-line-kmeans"
         else:
             # Fallback to traditional K-Means
-            n_clusters = min(self.params.expected_bases, len(filtered_positions))
+            n_clusters = min(n_clusters, len(filtered_positions))
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
             kmeans.fit(filtered_positions)
             unique_positions = kmeans.cluster_centers_.tolist()
@@ -157,9 +205,33 @@ class CoordinateProcessor(Node):
         Periodically processes collected positions to identify unique bases.
         This method is called by a timer.
         """
+        # Always publish markers to keep RViz updated, even if there's nothing new
+        # This will also handle clearing markers if everything is empty
+        defer_visualization = False
+
         if len(self.positions_list) < self.params.expected_bases:
             self.get_logger().info(
                 f"Waiting for more points... ({len(self.positions_list)}/{self.params.expected_bases})"
+            )
+            defer_visualization = True
+
+        # If all bases are confirmed, no need to cluster
+        num_bases_to_find = self.params.expected_bases - len(self.confirmed_bases)
+        if num_bases_to_find <= 0:
+            self.get_logger().info("All expected bases have been confirmed. Skipping clustering.")
+            self.unique_positions = self.confirmed_bases
+            self._publish_unique_positions()
+            # Defer visualization to the final block to keep logic clean
+            defer_visualization = True
+
+        if defer_visualization:
+            self.marker_manager.publish_markers(
+                all_positions=np.array(self.positions_list),
+                filtered_positions=np.array(self.unique_positions),
+                cluster_centers=self.unique_positions,
+                ground_truth_bases=self.params.ground_truth_bases,
+                initial_base_params=self.params.initial_base,
+                cluster_labels=None,
             )
             return
 
@@ -185,17 +257,20 @@ class CoordinateProcessor(Node):
         # Step 2: Run clustering
         try:
             unique_positions, cluster_labels, method = self._run_clustering(
-                filtered_positions
+                filtered_positions, num_bases_to_find
             )
-            self.unique_positions = unique_positions
+            # Combine confirmed bases with newly found clusters
+            self.unique_positions = self.confirmed_bases + unique_positions
         except Exception as e:
             self.get_logger().error(f"Clustering failed: {e}", exc_info=True)
             # Visualize points even if clustering fails to aid debugging
             self.marker_manager.publish_markers(
                 all_positions=positions_array,
                 filtered_positions=filtered_positions,
+                cluster_centers=[],
                 ground_truth_bases=self.params.ground_truth_bases,
                 initial_base_params=self.params.initial_base,
+                cluster_labels=None,
             )
             return
 
@@ -204,13 +279,14 @@ class CoordinateProcessor(Node):
             self.unique_positions.sort(key=lambda pos: np.linalg.norm(pos))
             self._publish_unique_positions()
             self._log_post_clustering_data(method)
+            # Combine all points for visualization
             self.marker_manager.publish_markers(
-                positions_array,
-                filtered_positions,
-                self.unique_positions,
-                self.params.ground_truth_bases,
-                self.params.initial_base,
-                cluster_labels,
+                all_positions=positions_array,
+                filtered_positions=filtered_positions,
+                cluster_centers=self.unique_positions,
+                ground_truth_bases=self.params.ground_truth_bases,
+                initial_base_params=self.params.initial_base,
+                cluster_labels=cluster_labels,
             )
             self.calculate_detection_accuracy(self.unique_positions)
         except Exception as e:
@@ -233,6 +309,20 @@ class CoordinateProcessor(Node):
         self.get_logger().info(
             f"Published {len(self.unique_positions)} unique positions."
         )
+
+    def _publish_confirmed_bases(self):
+        """Publishes the list of confirmed bases as a PoseArray."""
+        pose_array = PoseArray()
+        pose_array.header.stamp = self.get_clock().now().to_msg()
+        pose_array.header.frame_id = "map"
+        for pos in self.confirmed_bases:
+            pose = Pose()
+            # Assuming pos is [x, y], z is 0
+            pose.position.x, pose.position.y, pose.position.z = pos[0], pos[1], 0.0
+            pose.orientation.w = 1.0
+            pose_array.poses.append(pose)
+        self.confirmed_bases_publisher.publish(pose_array)
+        self.get_logger().info(f"Published {len(self.confirmed_bases)} confirmed bases.")
 
     def estimate_drone_movement_direction(self) -> np.ndarray:
         """Estimates the primary drone movement direction from position history."""

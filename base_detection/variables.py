@@ -10,8 +10,10 @@ NUMBER_OF_BASES_TOPIC = "base_detection/number_of_bases"
 # Coordinate Receiver
 DELTA_POINTS_TOPIC = "base_detection/delta_points"
 ABSOLUTE_POINTS_TOPIC = "base_detection/absolute_points"
+HIGH_ACCURACY_POINT_TOPIC = "base_detection/high_accuracy_point"
 DEPTH_IMAGE_TOPIC = f"camera/depth/depth_image"
 VEHICLE_LOCAL_POSITION_TOPIC = "/fmu/out/vehicle_local_position"
 
 # Coordinate Processor
 UNIQUE_POSITIONS_TOPIC = "base_detection/unique_positions"
+CONFIRMED_BASES_TOPIC = "base_detection/confirmed_bases"

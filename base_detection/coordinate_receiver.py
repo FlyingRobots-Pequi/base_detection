@@ -10,7 +10,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, PoseArray
 from cv_bridge import CvBridge
 import numpy as np
 from px4_msgs.msg import VehicleLocalPosition
@@ -25,6 +25,8 @@ from base_detection.variables import (
     DETECTED_COORDINATES_TOPIC,
     DELTA_POINTS_TOPIC,
     ABSOLUTE_POINTS_TOPIC,
+    HIGH_ACCURACY_POINT_TOPIC,
+    CONFIRMED_BASES_TOPIC,
     DEPTH_IMAGE_TOPIC,
     VEHICLE_LOCAL_POSITION_TOPIC,
 )
@@ -45,6 +47,7 @@ class CoordinateReceiver(Node):
         self.bridge = CvBridge()
 
         self.latest_depth = None
+        self.confirmed_bases = []
         self.vehicle_state = {
             "x": 0.0,
             "y": 0.0,
@@ -71,6 +74,9 @@ class CoordinateReceiver(Node):
         self.depth_subscription = self.create_subscription(
             Image, DEPTH_IMAGE_TOPIC, self.depth_callback, 10
         )
+        self.confirmed_bases_subscription = self.create_subscription(
+            PoseArray, CONFIRMED_BASES_TOPIC, self.confirmed_bases_callback, 10
+        )
         self.local_position_sub = self.create_subscription(
             VehicleLocalPosition, 
             VEHICLE_LOCAL_POSITION_TOPIC, 
@@ -81,8 +87,18 @@ class CoordinateReceiver(Node):
         self.absolute_publisher = self.create_publisher(
             Point, ABSOLUTE_POINTS_TOPIC, 10
         )
+        self.high_accuracy_publisher = self.create_publisher(
+            Point, HIGH_ACCURACY_POINT_TOPIC, 10
+        )
 
         self.get_logger().info("CoordinateReceiver initialized.")
+
+    def confirmed_bases_callback(self, msg: PoseArray):
+        """Callback to update the list of confirmed bases."""
+        self.confirmed_bases = [
+            (pose.position.x, pose.position.y) for pose in msg.poses
+        ]
+        self.get_logger().debug(f"Updated confirmed bases: {len(self.confirmed_bases)} bases.")
 
     def depth_callback(self, msg: Image):
         """Callback to process and store incoming depth images."""
@@ -121,14 +137,45 @@ class CoordinateReceiver(Node):
         self.get_logger().debug(f"Processing {len(detections)} detections.")
 
         compensated_pose = self._get_compensated_pose()
+        correction_vector = np.array([0.0, 0.0])
 
+        # First Pass: Find correction vector using a confirmed base
+        if self.confirmed_bases:
+            for x1, y1, x2, y2, score in detections:
+                result = self._process_one_detection(x1, y1, x2, y2, compensated_pose)
+                if result:
+                    absolute_point, _, _, _ = result
+                    current_pos = np.array([absolute_point.x, absolute_point.y])
+                    for confirmed_pos in self.confirmed_bases:
+                        dist = np.linalg.norm(current_pos - np.array(confirmed_pos))
+                        # Use a threshold to match a detection to a confirmed base
+                        if dist < self.params.confirmed_base_filter_radius: 
+                            correction_vector = current_pos - np.array(confirmed_pos)
+                            self.get_logger().info(f"Correction vector calculated: {correction_vector}")
+                            break  # Found a match, use this correction
+                if not np.all(correction_vector == 0.0):
+                    break # Exit outer loop once correction is found
+
+        # Second Pass: Process all detections and apply correction
         for x1, y1, x2, y2, score in detections:
             result = self._process_one_detection(x1, y1, x2, y2, compensated_pose)
             if result:
-                absolute_point, delta_point, is_remote = result
+                absolute_point, delta_point, is_high_accuracy = result
+                
+                # Apply correction
+                corrected_x = absolute_point.x - correction_vector[0]
+                corrected_y = absolute_point.y - correction_vector[1]
+                corrected_absolute_point = Point(x=corrected_x, y=corrected_y, z=absolute_point.z)
+
                 self.delta_publisher.publish(delta_point)
-                if is_remote:
-                    self.absolute_publisher.publish(absolute_point)
+
+                if is_high_accuracy:
+                    self.get_logger().info(
+                        "High accuracy point detected! Publishing to dedicated topic."
+                    )
+                    self.high_accuracy_publisher.publish(corrected_absolute_point)
+                else:
+                    self.absolute_publisher.publish(corrected_absolute_point)
 
     def _get_compensated_pose(self):
         """Gets the vehicle pose, compensated for processing delay."""
@@ -161,6 +208,14 @@ class CoordinateReceiver(Node):
         mid_x_rgb = (x1 + x2) / 2
         mid_y_rgb = (y1 + y2) / 2
 
+        # High accuracy check in pixel space
+        image_center_x = cam.rgb_width / 2
+        image_center_y = cam.rgb_height / 2
+        pixel_dist = np.sqrt(
+            (mid_x_rgb - image_center_x) ** 2 + (mid_y_rgb - image_center_y) ** 2
+        )
+        is_high_accuracy = pixel_dist < self.params.high_accuracy_pixel_threshold
+
         depth_h, depth_w = self.latest_depth.shape
         mid_x_depth = int(mid_x_rgb * (depth_w / cam.rgb_width))
         mid_y_depth = int(mid_y_rgb * (depth_h / cam.rgb_height))
@@ -168,7 +223,24 @@ class CoordinateReceiver(Node):
         if not (0 <= mid_y_depth < depth_h and 0 <= mid_x_depth < depth_w):
             return None
 
-        depth_value = self.latest_depth[mid_y_depth, mid_x_depth]
+        # --- Depth Sampling with Median Filter ---
+        patch_size = 5
+        half_patch = patch_size // 2
+        
+        y_start = max(0, mid_y_depth - half_patch)
+        y_end = min(depth_h, mid_y_depth + half_patch + 1)
+        x_start = max(0, mid_x_depth - half_patch)
+        x_end = min(depth_w, mid_x_depth + half_patch + 1)
+
+        depth_patch = self.latest_depth[y_start:y_end, x_start:x_end]
+        valid_depths = depth_patch[np.isfinite(depth_patch) & (depth_patch > 0)]
+
+        if valid_depths.size == 0:
+            return None # No valid depth points in the patch
+
+        depth_value = np.median(valid_depths)
+        # --- End of Depth Sampling ---
+
         if np.isnan(depth_value) or depth_value <= 0:
             return None
 
@@ -185,11 +257,7 @@ class CoordinateReceiver(Node):
         absolute_point = Point(x=global_x, y=global_y, z=comp_z - z)
         delta_point = Point(x=delta_x, y=delta_y, z=comp_z - z)
 
-        # A simplified check. For full decoupling, this parameter would
-        # be part of a shared config or this node's own parameters.
-        is_remote = np.sqrt(global_x**2 + global_y**2) > 0.7
-
-        return absolute_point, delta_point, is_remote
+        return absolute_point, delta_point, is_high_accuracy
 
 
 def main(args=None):

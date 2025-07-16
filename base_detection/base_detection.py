@@ -80,14 +80,34 @@ class ImageInferencer(Node):
         for result_fly in results_fly.boxes.data.tolist():
             x1, y1, x2, y2, score, class_id = result_fly
             if score > self.params.detection_threshold:
-                frame_detections.append([x1, y1, x2, y2, score])
+
+                # --- Centroid Refinement ---
+                # Fallback to bbox center if centroid fails
+                center_x = (x1 + x2) / 2
+                center_y = (y1 + y2) / 2
+
+                try:
+                    # Crop the HSV mask to the bounding box
+                    roi = mask[int(y1) : int(y2), int(x1) : int(x2)]
+                    
+                    # Calculate moments for the cropped mask
+                    moments = cv2.moments(roi)
+                    if moments["m00"] > 0:
+                        # Calculate centroid and convert to global coordinates
+                        c_x = int(moments["m10"] / moments["m00"]) + x1
+                        c_y = int(moments["m01"] / moments["m00"]) + y1
+                        center_x, center_y = float(c_x), float(c_y)
+                except Exception as e:
+                    self.get_logger().warn(f"Centroid calculation failed: {e}. Falling back to bbox center.")
+                
+                # Use a tiny bounding box around the centroid for publishing
+                # This ensures the receiver calculates the exact centroid without changing message format.
+                frame_detections.append([center_x -1, center_y -1, center_x + 1, center_y + 1, score])
 
                 cv2.rectangle(
                     result, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 4
                 )
-                center_x = int((x1 + x2) / 2)
-                center_y = int((y1 + y2) / 2)
-                cv2.circle(result, (center_x, center_y), 5, (0, 0, 255), -1)
+                cv2.circle(result, (int(center_x), int(center_y)), 5, (0, 0, 255), -1)
 
                 cv2.putText(
                     result,
