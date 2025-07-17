@@ -1,26 +1,79 @@
 # Base Detection System
 
-This repository contains a ROS2-based solution for autonomous base detection in robotics competitions. The system uses Intel RealSense D435i camera for depth sensing and computer vision to detect and calculate precise positions of bases in the competition arena.
+![License](https://img.shields.io/badge/License-MIT-blue.svg)![ROS Version](https://img.shields.io/badge/ROS-2%20Humble-blueviolet)![Python](https://img.shields.io/badge/Python-3.10-blue.svg)
+![Computer Vision](https://img.shields.io/badge/CV-OpenCV-orange.svg)![YOLO](https://img.shields.io/badge/YOLO-v8-blueviolet.svg)
+
+This repository contains a ROS2-based solution for autonomous base detection and high-precision localization, primarily for robotics competitions. The system uses an Intel RealSense D435i camera for depth sensing and a sophisticated computer vision pipeline to detect and calculate the precise positions of multiple bases in a competition arena.
+
+## Repository Structure
+
+```
+/home/saraiva/pequi/uav_px4_simulator/ros_packages/base_detection
+├── base_detection/   # Main Python package source code
+│   ├── __init__.py
+│   ├── base_detection.py       # Node for YOLO detection and centroid refinement
+│   ├── clustering.py           # Clustering algorithms (K-Means, etc.)
+│   ├── coordinate_processor.py # Node for clustering, state management, and feedback
+│   ├── coordinate_receiver.py  # Node for 3D projection, rotation, and correction
+│   ├── parameters.py           # ROS2 parameter declaration and management
+│   ├── utils.py                # Utility functions (outlier removal, etc.)
+│   ├── variables.py            # Central repository for topic names
+│   └── visualization.py        # RViz marker management
+├── config/             # YAML configuration files for nodes (Not yet used)
+├── launch/             # ROS2 launch files to start the system nodes
+├── resource/           # ament resource index
+├── test/               # Unit and integration tests (Not yet implemented)
+├── package.xml         # ROS2 package manifest
+├── README.md           # This documentation file
+└── setup.py            # Python package setup script
+```
 
 ## System Architecture
 
-### Component Overview
+The system is composed of three main ROS2 nodes that work in concert to transform raw sensor data into a stable, accurate map of base positions. It features advanced techniques such as centroid refinement, robust depth sampling, and a feedback loop for in-flight error correction.
+
+### Component and Data Flow
 
 ```mermaid
 graph TD
-    A[Base Detection Node] -->|Detected Coordinates| B[Coordinate Receiver]
-    C[D435i Camera] -->|Depth Image| B
-    D[PX4 Flight Controller] -->|Vehicle Position| B
-    B -->|Delta Position| E[Navigation System]
-  
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style B fill:#bbf,stroke:#333,stroke-width:2px
-    style C fill:#dfd,stroke:#333,stroke-width:2px
-    style D fill:#fdd,stroke:#333,stroke-width:2px
-    style E fill:#ddf,stroke:#333,stroke-width:2px
+    subgraph "Sensors"
+        direction LR
+        A(D435i RGB Camera)
+        D(D435i Depth Camera)
+        E(PX4 Flight Controller)
+    end
+
+    subgraph "ROS Nodes"
+        direction LR
+        B(Base Detection Node)
+        C(Coordinate Receiver Node)
+        F(Coordinate Processor Node)
+    end
+    
+    subgraph "Downstream"
+        direction LR
+        G(Navigation System)
+        H(RViz Visualization)
+    end
+
+    A -- "RGB Image" --> B
+    D -- "Depth Image" --> C
+    E -- "Vehicle Position" --> C
+    E -- "Vehicle Attitude (Quat)" --> C
+
+    B -- "Detected Coordinates<br/>(Refined Centroids)" --> C
+    
+    C -- "Absolute Points<br/>(Weighted)" --> F
+    C -- "High-Accuracy Points" --> F
+    
+    F -- "Confirmed Bases<br/>(Feedback Loop)" --> C
+    F -- "Unique Positions" --> G
+    
+    B -- "Debug Image" --> H
+    F -- "Visualization Markers" --> H
 ```
 
-### Data Flow
+### Data Processing Timeline
 
 ```mermaid
 sequenceDiagram
@@ -32,125 +85,97 @@ sequenceDiagram
     participant CPN as Coordinate Processor Node
     participant Nav as Navigation System
 
-    Note over Camera,Nav: Base Detection Process Timeline
+    Note over Camera,Nav: System Operation Timeline
     
-    Camera->>BDN: RGB Image (/hermit/camera/d435i/color/image_raw)
+    Camera->>BDN: RGB Image
     activate BDN
-    
-    BDN->>BDN: HSV Color Filtering (H:42-135, S:30-190, V:120-220)
-    BDN->>BDN: YOLO Inference (Threshold: 0.9)
-    BDN->>BDN: Bounding Box Extraction
-    
-    BDN-->>BDN: Publish visualization (inferred_image_capiche)
-    BDN->>CRN: Send detected coordinates [x1,y1,x2,y2]
+    BDN->>BDN: HSV Color Filtering
+    BDN->>BDN: YOLO Inference
+    BDN->>BDN: Centroid Refinement on BBox
+    BDN->>CRN: Detected Coordinates (refined)
     deactivate BDN
     
     activate CRN
-    Depth->>CRN: Depth Image (/hermit/camera/d435i/depth/image_rect_raw)
-    PX4->>CRN: Vehicle Position (/fmu/out/vehicle_local_position)
+    Depth->>CRN: Depth Image
+    PX4->>CRN: Vehicle Telemetry (Position + Attitude)
+    CPN-->>CRN: Confirmed Bases (feedback loop)
     
-    CRN->>CRN: Validate bounding box (check if square)
-    CRN->>CRN: Calculate midpoint (x,y)
-    CRN->>CRN: Get depth value at midpoint
-    CRN->>CRN: Calculate real-world position (using camera params)
-    CRN->>CRN: Safety check (altitude > -0.13m)
+    CRN->>CRN: 1. Depth Sampling (Median Filter)
+    CRN->>CRN: 2. Calculate 3D position in camera frame
+    CRN->>CRN: 3. Apply full 3D rotation (Roll, Pitch, Yaw)
+    CRN->>CRN: 4. Calculate error vector from Confirmed Bases
+    CRN->>CRN: 5. Apply correction to all points
+    CRN->>CRN: 6. Calculate quality weight for each point
     
-    CRN->>CPN: Publish delta position (x,y,z)
+    CRN->>CPN: Absolute Points (with weight in z-field)
+    opt Is High Accuracy (center of image)
+        CRN->>CPN: High Accuracy Point
+    end
     deactivate CRN
     
     activate CPN
+    CPN->>CPN: Accumulate position measurements & weights
+    opt New High Accuracy Point
+        CPN->>CPN: Add to Confirmed Bases list
+        CPN->>CPN: Publish updated Confirmed Bases
+    end
+
+    Note over CPN: On processing timer or event
     
-    CPN->>CPN: Accumulate position measurements
+    CPN->>CPN: Outlier rejection
+    CPN->>CPN: Weighted K-means clustering
     
-    Note over CPN: After collecting multiple positions
-    
-    CPN->>CPN: K-means clustering (n_clusters=3)
-    CPN->>CPN: Create setpoints (add z=-1.5m)
-    
-    CPN->>Nav: Publish unique positions
+    CPN->>Nav: Publish Unique Positions
+    CPN-->>CPN: Publish RViz markers
     deactivate CPN
     
-    Note over Camera,Nav: Process repeats continuously during operation
+    Note over Camera,Nav: Process repeats continuously
 ```
-### Geral overview
-
-```mermaid
-flowchart TD
-    A(D435i Camera) --> B{{Base Detection Node}}
-    D(D435i Depth Camera) --> C{{Coordinate Receiver Node}}
-    E(PX4 Flight Controller) --> C
-    
-    B -- detected_coordinates --> C
-    C -- delta_position --> F{{Coordinate Processor Node}}
-    
-    F -- unique_positions --> G(Navigation System)
-    B -- inferred_image --> H(Visualization)
-    
-    subgraph base_detection
-    B --> B1(HSV Filtering)
-    B1 --> B2(YOLO Inference)
-    B2 --> B3(Extraction)
-    end
-    
-    subgraph coordinate_receiver
-    C --> C1(Validate Box)
-    C1 --> C2(Calculate Midpoint)
-    C2 --> C3(Get Depth)
-    C3 --> C4(Calculate Position)
-    end
-    
-    subgraph coordinate_processor
-    F --> F1(Collect Positions)
-    F1 --> F2(K-means Clustering)
-    F2 --> F3(Create Waypoints)
-    end
-    
-    %% Topic details
-    A -.-> |sensor_msgs/Image| B
-    D -.-> |sensor_msgs/Image| C 
-    E -.-> |px4_msgs/VehicleLocalPosition| C
-    
-    %% Parameter notes
-    B1 -.-> |H:42-135, S:30-190, V:120-220| B2
-    B2 -.-> |Threshold: 0.9| B3
-    C3 -.-> |Camera params: fx=fy=925.1 cx_depth=639.5 cy_depth=359.5 baseline=0.025 bias_x=bias_y=0.1| C4
-    C -.-> |Safety: altitude > -0.13m| C5(Failsafe)
-    F2 -.-> |n_clusters=3| F3
-    F3 -.-> |z=-1.5m| G
-```
-
 
 ## Key Components
 
-1. **Base Detection Node**
+1.  **Base Detection Node**
+    -   Processes RGB images from the D435i camera.
+    -   Detects bases using a combination of HSV color filtering and a YOLO model.
+    -   **Performs centroid refinement on detected bounding boxes for higher 2D accuracy.**
+    -   Publishes the refined coordinates and a debug image for visualization.
 
-   - Processes RGB images from D435i camera
-   - Detects bases using computer vision
-   - Publishes detected coordinates
-2. **Coordinate Receiver Node**
+2.  **Coordinate Receiver Node**
+    -   Subscribes to detected coordinates, depth images, vehicle telemetry (position and attitude), and a feedback topic of confirmed bases. Its key responsibilities include:
+        -   **Stabilizing depth readings** via neighborhood sampling (median filter).
+        -   Projecting 2D detections into 3D points relative to the camera.
+        -   **Applying full 3D rotation (roll, pitch, yaw)** to transform points into the world frame.
+        -   **Calculating and applying a position correction vector** based on re-detected confirmed bases.
+        -   **Assigning a quality weight** to each detection based on its distance from the image center.
+        -   Publishing absolute 3D points (with weight embedded in the z-coordinate) and high-accuracy points.
 
-   - Subscribes to:
-     - Detected coordinates
-     - Depth images
-     - Vehicle local position
-   - Processes 3D position calculations
-   - Handles coordinate transformations
-   - Publishes delta positions for navigation
-3. **Camera System**
+3.  **Coordinate Processor Node**
+    -   Acts as the system's memory and fusion center. It accumulates detections over time to produce a stable map of the bases. Its key responsibilities include:
+        -   **Managing a list of high-certainty "confirmed bases"**.
+        -   **Publishing the list of confirmed bases** as a feedback loop to the `CoordinateReceiver`.
+        -   Performing outlier rejection on accumulated points.
+        -   **Using a weighted K-Means algorithm** to find cluster centers, giving more importance to high-quality detections.
+        -   Publishing the final, unique base positions for the navigation system and for RViz visualization.
 
-   - Uses Intel RealSense D435i
-   - Provides RGB and depth data
-   - Camera Parameters:
-     - Focal Length: 925.1 pixels
-     - Principal Point: (639.5, 359.5)
-     - Baseline: 0.025m
 
 ## ROS2 Topic Structure
 
-- `/detected_coordinates` (Float32MultiArray): Base detection coordinates
-- `/hermit/camera/d435i/depth/image_rect_raw` (Image): Depth image data
-- `/fmu/out/vehicle_local_position` (VehicleLocalPosition): Current vehicle position
-- `/delta_position` (Point): Processed position delta
+### Primary Topics
+-   `base_detection/detected_coordinates` (`Float32MultiArray`): Publishes the refined 2D coordinates `[x1, y1, x2, y2, score]` of each detection.
+-   `base_detection/absolute_points` (`Point`): Publishes the calculated 3D position of each base after rotation and correction. **The `z` field is used to carry the detection's quality weight (0.0 to 1.0).**
+-   `base_detection/high_accuracy_point` (`Point`): Publishes the position of a base when it is detected in the center of the image, used to create a "confirmed base".
+-   `base_detection/unique_positions` (`PoseArray`): Publishes the final, stable positions of all unique bases found by the system. This is the primary output for a navigation system.
+-   `base_detection/confirmed_bases` (`PoseArray`): The feedback topic used by the `CoordinateProcessor` to send the current list of known bases back to the `CoordinateReceiver` for error correction.
+
+### Sensor and Telemetry Inputs
+-   `/camera/color/image_raw` (`Image`): RGB image from the camera.
+-   `/camera/depth/image_rect_raw` (`Image`): Depth image from the camera.
+-   `/fmu/out/vehicle_local_position` (`VehicleLocalPosition`): Used for vehicle position (x,y,z) and velocities.
+-   `/fmu/out/vehicle_attitude` (`VehicleAttitude`): **Used for complete 3D orientation (quaternion) to correct for roll and pitch.**
+
+### Visualization Topics
+-   `base_detection/inferred_image` (`Image`): The input image with detections, centroids, and bounding boxes drawn on it.
+-   `base_detection/visualization_markers` (`MarkerArray`): Publishes various markers (raw points, cluster centers, ground truth) for visualization in RViz.
 
 ## Setup and Installation
 
@@ -267,3 +292,7 @@ Common issues and solutions:
 3. Commit your changes
 4. Push to the branch
 5. Create a new Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the `LICENSE` file for details (if available), or refer to the standard MIT License text.
