@@ -3,6 +3,8 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+PACKAGE_NAME = 'base_detection'
+
 def generate_launch_description():
     output_arg = DeclareLaunchArgument(
         'output', default_value='screen',
@@ -13,7 +15,7 @@ def generate_launch_description():
         output_arg,
 
         Node(
-            package='base_detection',
+            package=PACKAGE_NAME,
             executable='base_detection',
             name='base_detection_node',
             output=LaunchConfiguration('output'),
@@ -21,7 +23,7 @@ def generate_launch_description():
             respawn_delay=1.0
         ),
         Node(
-            package='base_detection',
+            package=PACKAGE_NAME,
             executable='coordinate_processor',
             name='coordinate_processor_node',
             output=LaunchConfiguration('output'),
@@ -29,7 +31,7 @@ def generate_launch_description():
             respawn_delay=1.0
         ),
         Node(
-            package='base_detection',
+            package=PACKAGE_NAME,
             executable='coordinate_receiver',
             name='coordinate_receiver_node',
             output=LaunchConfiguration('output'),
