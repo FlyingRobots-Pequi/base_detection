@@ -1,27 +1,33 @@
-from setuptools import setup
+from setuptools import find_packages, setup
+import os
+from glob import glob
 
 package_name = 'base_detection'
 
 setup(
     name=package_name,
-    version='0.0.1',
-    packages=[package_name],
-    install_requires=['setuptools'],
+    version='0.0.0',
+    packages=find_packages(exclude=['test']),
+    install_requires=['setuptools', 'numpy<2.0.0', 'opencv-python', 'torch', 'ultralytics', 'scipy', 'matplotlib', 'scikit-learn'],
+    include_package_data=True,
+    package_data={'': ['best.pt']},
     zip_safe=True,
     data_files=[
-        ('share/' + package_name +'/launch',['launch/base_detection.launch.py']),
+        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
-    maintainer='lufa',
-    maintainer_email='lufa@todo.todo',
-    description='The base_detection package for ROS 2',
-    license='Apache-2.0',
+    maintainer='Pedro Saraiva',
+    maintainer_email='pedro.a.saraiva08@gmail.com',
+    description='Base detection package for UAV precision landing',
+    license='MIT',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'base_detection = base_detection.base_detection:main',
+            'base_detector = base_detection.base_detection:main',
             'coordinate_receiver = base_detection.coordinate_receiver:main',
-            'coordinate_processor = base_detection.coordinate_processor:main',
-            'shutown_client = base_detection.shutdown:main' 
+            'coordinate_processor = base_detection.coordinate_processor:main'
         ],
     },
 )

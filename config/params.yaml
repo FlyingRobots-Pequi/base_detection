@@ -1,0 +1,65 @@
+
+coordinate_processor:
+  ros__parameters:
+    expected_bases: 5
+    outlier_threshold: 1.5
+    use_line_based_clustering: True
+    line_tolerance: 0.3
+    min_line_points: 3
+    line_detection_ransac_iterations: 100
+    collinearity_weight: 15.0
+    output_dir: "/root/ros2_ws/tuning_results/default_run"
+    clustering_logs_dir: "/root/ros2_ws/clustering_logs"
+
+    initial_base:
+      exclusion_radius: 0.7
+      x: 0.0
+      y: 0.0
+
+    ground_truth_bases_dim: 2
+    ground_truth_bases: [
+      -0.24, -3.23,
+      0.75, -5.05,
+      5.16, -5.75,
+      4.37, -2.30,
+      5.69, -0.25
+    ]
+
+coordinate_receiver:
+  ros__parameters:
+    motion_compensation_enabled: True
+    adaptive_timeout_enabled: True
+    motion_stability_threshold: 0.5
+    processing_delay_estimate: 0.1
+    base_frame_timeout: 0.2
+    min_frame_timeout: 0.05
+    max_frame_timeout: 0.3
+    velocity_scale_factor: 0.1
+    motion_confidence_factor: 1.0
+    velocity_outlier_threshold: 2.0
+    outlier_velocity_threshold: 2.0
+    outlier_distance_threshold: 5.0
+    csv_logs_dir: "/root/ros2_ws/detection_logs"
+
+    camera:
+      name: "D455"
+      bias_x: 0.02447
+      bias_y: -0.00130
+      fx: 917.06
+      fy: 917.06
+      cx: 639.5
+      cy: 359.5
+      baseline: 0.052
+      rgb_width: 1920
+      rgb_height: 1080
+      depth_width: 1280
+      depth_height: 720
+
+brota_na_base:
+  ros__parameters:
+    model_path: "/root/ros2_ws/src/base_detection/base_detection/best.pt"
+    detection_threshold: 0.9
+    
+    hsv_filter:
+      lower: [42, 30, 120]
+      upper: [135, 190, 220] 
