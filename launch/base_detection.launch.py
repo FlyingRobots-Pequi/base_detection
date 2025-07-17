@@ -8,7 +8,7 @@ NODES_NAMES = ['base_detection', 'coordinate_receiver', 'coordinate_processor']
 def generate_launch_description():
     output_arg = DeclareLaunchArgument(
         'output', default_value='screen',
-        description='Define onde o output dos nós será exibido (screen ou log)'
+        description='Define onde o output dos nós será exibido (screen ou log)',
     )
 
     node_args = dict(
