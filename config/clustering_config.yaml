@@ -1,0 +1,20 @@
+coordinate_processor:
+  ros__parameters:
+    # Line-based clustering parameters
+    use_line_based_clustering: true
+    line_tolerance: 0.3  # meters - tolerance for considering points on same line
+    min_line_points: 3   # minimum points to form a line
+    line_detection_ransac_iterations: 100  # RANSAC iterations for line detection
+    
+    # Traditional clustering fallback parameters
+    use_dbscan: false
+    outlier_threshold: 1.5
+    dbscan_eps: 0.9
+    dbscan_min_samples: 3
+    
+    # Base detection parameters
+    expected_bases: 5
+    
+    # Logging and debugging
+    enable_csv_logging: true
+    enable_visualization_markers: true 
