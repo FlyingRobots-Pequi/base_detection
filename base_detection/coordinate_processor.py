@@ -16,7 +16,7 @@ from rclpy.qos import (
     QoSDurabilityPolicy,
 )
 from geometry_msgs.msg import Point, PoseArray, Pose
-from px4_msgs.msg import VehicleLocalPosition
+from px4_msgs.msg import VehicleLocalPosition, VehicleOdometry
 import numpy as np
 import os
 from datetime import datetime
@@ -29,6 +29,7 @@ from .variables import (
     VEHICLE_LOCAL_POSITION_TOPIC,
     HIGH_ACCURACY_POINT_TOPIC,
     CONFIRMED_BASES_TOPIC,
+    VEHICLE_ODOMETRY_TOPIC,
 )
 from .parameters import get_coordinate_processor_params
 from .clustering import run_hybrid_line_kmeans
@@ -58,6 +59,7 @@ class CoordinateProcessor(Node):
         self.drone_position_history = []
         self.max_position_history = 50
         self.initial_clustering_done = False
+        self.has_odometry = False
         
         sensor_qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -79,6 +81,12 @@ class CoordinateProcessor(Node):
             VehicleLocalPosition,
             VEHICLE_LOCAL_POSITION_TOPIC,
             self.vehicle_local_position_callback,
+            sensor_qos_profile,
+        )
+        self.odometry_sub = self.create_subscription(
+            VehicleOdometry,
+            VEHICLE_ODOMETRY_TOPIC,
+            self.vehicle_odometry_callback,
             sensor_qos_profile,
         )
         self.unique_positions_publisher = self.create_publisher(
@@ -157,9 +165,22 @@ class CoordinateProcessor(Node):
                 self.get_logger().info(f"Removed {removed_count} nearby points from processing list.")
             self.positions_list = points_to_keep
 
+    def vehicle_odometry_callback(self, msg: VehicleOdometry):
+        """Stores vehicle position history from odometry data."""
+        self.has_odometry = True
+        current_position = [msg.position[0], msg.position[1]]
+        self._update_drone_position_history(current_position)
+
     def vehicle_local_position_callback(self, msg: VehicleLocalPosition):
-        """Stores vehicle position history to estimate movement direction."""
+        """Stores vehicle position history (fallback if no odometry)."""
+        if self.has_odometry:
+            return  # Odometry has priority
+
         current_position = [msg.x, msg.y]
+        self._update_drone_position_history(current_position)
+
+    def _update_drone_position_history(self, current_position: list):
+        """Helper to append a new position to the history list if it's moved enough."""
         if (
             not self.drone_position_history
             or np.linalg.norm(
@@ -412,7 +433,7 @@ class CoordinateProcessor(Node):
                                 i,
                                 pos[0],
                                 pos[1],
-                                pos[2],
+                                pos[2] if len(pos) > 2 else 0.0, # Handle 2D and 3D points
                                 np.linalg.norm(pos[:2]),
                                 clustering_method,
                                 datetime.now().isoformat(),

@@ -13,7 +13,8 @@ from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import Point, PoseArray
 from cv_bridge import CvBridge
 import numpy as np
-from px4_msgs.msg import VehicleLocalPosition
+from px4_msgs.msg import VehicleLocalPosition, VehicleOdometry
+from scipy.spatial.transform import Rotation as R
 from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
@@ -29,6 +30,7 @@ from base_detection.variables import (
     CONFIRMED_BASES_TOPIC,
     DEPTH_IMAGE_TOPIC,
     VEHICLE_LOCAL_POSITION_TOPIC,
+    VEHICLE_ODOMETRY_TOPIC,
 )
 from base_detection.parameters import get_coordinate_receiver_params
 from base_detection.utils import calculate_motion_compensation
@@ -48,14 +50,20 @@ class CoordinateReceiver(Node):
 
         self.latest_depth = None
         self.confirmed_bases = []
+        self.has_odometry = False
+        self.odometry_warning_logged = False
+
         self.vehicle_state = {
             "x": 0.0,
             "y": 0.0,
             "alt": 0.0,
-            "yaw": 0.0,
+            "q": np.array([0.0, 0.0, 0.0, 1.0]), # x, y, z, w
             "vx": 0.0,
             "vy": 0.0,
             "vz": 0.0,
+            "roll_rate": 0.0,
+            "pitch_rate": 0.0,
+            "yaw_rate": 0.0,
             "ax": 0.0,
             "ay": 0.0,
             "az": 0.0,
@@ -83,6 +91,12 @@ class CoordinateReceiver(Node):
             self.vehicle_local_position_callback, 
             qos_profile,
         )
+        self.odometry_sub = self.create_subscription(
+            VehicleOdometry,
+            VEHICLE_ODOMETRY_TOPIC,
+            self.vehicle_odometry_callback,
+            qos_profile,
+        )
         self.delta_publisher = self.create_publisher(Point, DELTA_POINTS_TOPIC, 10)
         self.absolute_publisher = self.create_publisher(
             Point, ABSOLUTE_POINTS_TOPIC, 10
@@ -92,6 +106,20 @@ class CoordinateReceiver(Node):
         )
 
         self.get_logger().info("CoordinateReceiver initialized.")
+
+        # Timer to check for odometry after a delay
+        self.odometry_check_timer = self.create_timer(5.0, self.check_odometry_availability)
+
+    def check_odometry_availability(self):
+        """Check if odometry data is being received and log a warning if not."""
+        if not self.has_odometry and not self.odometry_warning_logged:
+            self.get_logger().warn(
+                "VehicleOdometry not received. Falling back to 2D rotation (yaw only). "
+                "System will have reduced accuracy when drone is tilted."
+            )
+            self.odometry_warning_logged = True
+        # Cancel the timer after the first check to prevent repeated logs
+        self.odometry_check_timer.cancel()
 
     def confirmed_bases_callback(self, msg: PoseArray):
         """Callback to update the list of confirmed bases."""
@@ -106,23 +134,47 @@ class CoordinateReceiver(Node):
             msg, desired_encoding="passthrough"
         ).astype(np.float32)
 
-    def vehicle_local_position_callback(self, msg: VehicleLocalPosition):
-        """Callback to update vehicle position, orientation, and motion data."""
+    def vehicle_odometry_callback(self, msg: VehicleOdometry):
+        """Callback to update vehicle state from full odometry data."""
+        self.has_odometry = True
+        # PX4 uses w,x,y,z -> SciPy uses x,y,z,w
+        q_scipy = np.array([msg.q[1], msg.q[2], msg.q[3], msg.q[0]])
         self.vehicle_state.update(
             {
-                "x": msg.x,
-                "y": msg.y,
-                "alt": msg.z,
-                "yaw": msg.heading,
-                "vx": msg.vx,
-                "vy": msg.vy,
-                "vz": msg.vz,
-                "ax": msg.ax,
-                "ay": msg.ay,
-                "az": msg.az,
+                "x": msg.position[0],
+                "y": msg.position[1],
+                "alt": msg.position[2],
+                "q": q_scipy,
+                "vx": msg.velocity[0],
+                "vy": msg.velocity[1],
+                "vz": msg.velocity[2],
+                "roll_rate": msg.angular_velocity[0],
+                "pitch_rate": msg.angular_velocity[1],
+                "yaw_rate": msg.angular_velocity[2],
+                "ax": 0.0, "ay": 0.0, "az": 0.0, # Reset acceleration, not in odom
                 "timestamp": time.time(),
             }
         )
+
+    def vehicle_local_position_callback(self, msg: VehicleLocalPosition):
+        """Callback to update vehicle position, orientation, and motion data."""
+        # This callback is now primarily a fallback if odometry is not available.
+        if not self.has_odometry:
+            self.vehicle_state.update(
+                {
+                    "x": msg.x,
+                    "y": msg.y,
+                    "alt": msg.z,
+                    "yaw": msg.heading,
+                    "vx": msg.vx,
+                    "vy": msg.vy,
+                    "vz": msg.vz,
+                    "ax": msg.ax,
+                    "ay": msg.ay,
+                    "az": msg.az,
+                    "timestamp": time.time(),
+                }
+            )
 
     def listener_callback(self, msg: Float32MultiArray):
         """Processes batched base detections with motion compensation."""
@@ -136,13 +188,15 @@ class CoordinateReceiver(Node):
             
         self.get_logger().debug(f"Processing {len(detections)} detections.")
 
-        compensated_pose = self._get_compensated_pose()
+        # The rest of the function now relies on the compensated pose
+        compensated_position, compensated_orientation_q = self._get_compensated_pose()
+
         correction_vector = np.array([0.0, 0.0])
 
         # First Pass: Find correction vector using a confirmed base
         if self.confirmed_bases:
             for x1, y1, x2, y2, score in detections:
-                result = self._process_one_detection(x1, y1, x2, y2, compensated_pose)
+                result = self._process_one_detection(x1, y1, x2, y2, compensated_position, compensated_orientation_q)
                 if result:
                     absolute_point, _, _, _ = result
                     current_pos = np.array([absolute_point.x, absolute_point.y])
@@ -158,7 +212,7 @@ class CoordinateReceiver(Node):
 
         # Second Pass: Process all detections and apply correction
         for x1, y1, x2, y2, score in detections:
-            result = self._process_one_detection(x1, y1, x2, y2, compensated_pose)
+            result = self._process_one_detection(x1, y1, x2, y2, compensated_position, compensated_orientation_q)
             if result:
                 absolute_point, delta_point, is_high_accuracy = result
                 
@@ -179,6 +233,18 @@ class CoordinateReceiver(Node):
 
     def _get_compensated_pose(self):
         """Gets the vehicle pose, compensated for processing delay."""
+        q_scipy = self.vehicle_state["q"]
+        # For fallback, create a pseudo-quaternion from yaw if needed
+        if not self.has_odometry:
+            try:
+                yaw = self.vehicle_state["yaw"]
+                # Create quaternion from yaw (rotation around Z axis), gives x,y,z,w
+                q_scipy = R.from_euler('z', yaw).as_quat()
+            except Exception as e:
+                self.get_logger().error(f"Failed to create quaternion from yaw: {e}. Using identity.")
+                q_scipy = np.array([0.0, 0.0, 0.0, 1.0])
+
+
         return calculate_motion_compensation(
             detection_timestamp=time.time(),
             vehicle_timestamp=self.vehicle_state["timestamp"],
@@ -186,8 +252,8 @@ class CoordinateReceiver(Node):
                 self.vehicle_state["x"],
                 self.vehicle_state["y"],
                 self.vehicle_state["alt"],
-                self.vehicle_state["yaw"],
             ),
+            current_orientation_q=q_scipy,
             current_velocity=(
                 self.vehicle_state["vx"],
                 self.vehicle_state["vy"],
@@ -198,11 +264,16 @@ class CoordinateReceiver(Node):
                 self.vehicle_state["ay"],
                 self.vehicle_state["az"],
             ),
+            current_angular_velocity=(
+                self.vehicle_state["roll_rate"],
+                self.vehicle_state["pitch_rate"],
+                self.vehicle_state["yaw_rate"],
+            ),
             motion_params=self.params.motion,
             logger=self.get_logger(),
         )
 
-    def _process_one_detection(self, x1, y1, x2, y2, compensated_pose):
+    def _process_one_detection(self, x1, y1, x2, y2, compensated_position, compensated_orientation_q):
         """Transforms a single detection into 3D coordinates."""
         cam = self.params.camera
         mid_x_rgb = (x1 + x2) / 2
@@ -249,18 +320,23 @@ class CoordinateReceiver(Node):
             return None
 
         z = depth_value / 1000.0
-        comp_x, comp_y, comp_z, comp_yaw = compensated_pose
 
         delta_x = (mid_x_depth - cam.cx) * z / cam.fx + cam.baseline - cam.bias_x
         delta_y = (mid_y_depth - cam.cy) * z / cam.fy - cam.bias_y
 
-        cos_yaw, sin_yaw = np.cos(comp_yaw), np.sin(comp_yaw)
-        global_x = comp_x + (delta_x * cos_yaw - delta_y * sin_yaw)
-        global_y = comp_y + (delta_x * sin_yaw + delta_y * cos_yaw)
+        # 3D Rotation using Quaternion
+        rotation = R.from_quat(compensated_orientation_q)
+        
+        camera_frame_vector = np.array([delta_x, delta_y, z])
+        world_frame_vector = rotation.apply(camera_frame_vector)
+
+        global_x = compensated_position[0] + world_frame_vector[0]
+        global_y = compensated_position[1] + world_frame_vector[1]
+        global_z_base = compensated_position[2] + world_frame_vector[2]
 
         # Use the 'z' field to pass the weight of the detection
         absolute_point = Point(x=global_x, y=global_y, z=weight)
-        delta_point = Point(x=delta_x, y=delta_y, z=comp_z - z)
+        delta_point = Point(x=delta_x, y=delta_y, z=global_z_base)
 
         return absolute_point, delta_point, is_high_accuracy
 

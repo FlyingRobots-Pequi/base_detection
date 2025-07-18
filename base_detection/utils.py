@@ -172,19 +172,22 @@ def assess_motion_stability(
 def calculate_motion_compensation(
     detection_timestamp: float,
     vehicle_timestamp: float,
-    current_pose: Tuple[float, float, float, float],
+    current_pose: Tuple[float, float, float],
+    current_orientation_q: np.ndarray,
     current_velocity: Tuple[float, float, float],
     current_acceleration: Tuple[float, float, float],
+    current_angular_velocity: Tuple[float, float, float],
     motion_params: MotionParams,
     logger: Logger,
-) -> Tuple[float, float, float, float]:
-    """Calculates vehicle position at detection time to compensate for processing delay."""
-    current_x, current_y, current_altitude, current_yaw = current_pose
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Calculates vehicle pose (position and orientation) at detection time."""
+    current_x, current_y, current_altitude = current_pose
     vx, vy, vz = current_velocity
     ax, ay, az = current_acceleration
+    roll_rate, pitch_rate, yaw_rate = current_angular_velocity
 
     if not motion_params.compensation_enabled:
-        return current_pose
+        return np.array(current_pose), current_orientation_q
 
     time_delta = detection_timestamp - vehicle_timestamp
 
@@ -192,25 +195,30 @@ def calculate_motion_compensation(
         logger.debug(
             f"⚠️ Large time delta ({time_delta:.3f}s), skipping motion compensation"
         )
-        return current_pose
+        return np.array(current_pose), current_orientation_q
 
+    # Position Compensation
     compensated_x = current_x - (vx * time_delta + 0.5 * ax * time_delta**2)
     compensated_y = current_y - (vy * time_delta + 0.5 * ay * time_delta**2)
     compensated_z = current_altitude - (vz * time_delta + 0.5 * az * time_delta**2)
-    compensated_yaw = current_yaw
+    compensated_position = np.array([compensated_x, compensated_y, compensated_z])
+    
+    # Orientation Compensation
+    # Create the rotation vector from angular velocity
+    rotation_vector = np.array([roll_rate, pitch_rate, yaw_rate]) * -time_delta
+    delta_rotation = Rotation.from_rotvec(rotation_vector)
+    
+    # Combine with the current orientation
+    current_rotation = Rotation.from_quat(current_orientation_q)
+    compensated_rotation = delta_rotation * current_rotation
+    compensated_orientation_q = compensated_rotation.as_quat()
 
-    velocity_magnitude = np.sqrt(vx**2 + vy**2)
-    position_compensation = np.sqrt(
-        (current_x - compensated_x) ** 2 + (current_y - compensated_y) ** 2
-    )
 
-    if position_compensation > 0.01:
-        accel_magnitude = np.sqrt(ax**2 + ay**2)
+    position_compensation_dist = np.linalg.norm(np.array(current_pose) - compensated_position)
+    
+    if position_compensation_dist > 0.01:
         logger.debug("🔧 Motion Compensation Applied:")
         logger.debug(f"  ⏱️ Time delta: {time_delta:.3f}s")
-        logger.debug(
-            f"  🏃 Velocity: {velocity_magnitude:.3f}m/s, Accel: {accel_magnitude:.3f}m/s²"
-        )
-        logger.debug(f"  📍 Position compensation: {position_compensation:.3f}m")
+        logger.debug(f"  📍 Position compensation: {position_compensation_dist:.3f}m")
 
-    return compensated_x, compensated_y, compensated_z, compensated_yaw
+    return compensated_position, compensated_orientation_q
