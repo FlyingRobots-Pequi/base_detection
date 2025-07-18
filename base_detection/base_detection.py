@@ -152,14 +152,8 @@ def main(args=None):
     """Initializes and runs the ROS2 node."""
     rclpy.init(args=args)
     image_inferencer = ImageInferencer()
-
-    try:
-        rclpy.spin(image_inferencer)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        image_inferencer.destroy_node()
-        rclpy.shutdown()
+    rclpy.spin(image_inferencer)
+    image_inferencer.destroy_node()
 
 
 if __name__ == "__main__":

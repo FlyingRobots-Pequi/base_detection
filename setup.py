@@ -6,8 +6,8 @@ package_name = 'base_detection'
 
 setup(
     name=package_name,
-    version='0.0.0',
-    packages=find_packages(exclude=['test']),
+    version='0.0.1',
+    packages=['base_detection'],
     install_requires=['setuptools', 'numpy<2.0.0', 'opencv-python', 'torch', 'ultralytics', 'scipy', 'matplotlib', 'scikit-learn'],
     include_package_data=True,
     package_data={'': ['best.pt']},
@@ -27,7 +27,8 @@ setup(
         'console_scripts': [
             'base_detector = base_detection.base_detection:main',
             'coordinate_receiver = base_detection.coordinate_receiver:main',
-            'coordinate_processor = base_detection.coordinate_processor:main'
+            'coordinate_processor = base_detection.coordinate_processor:main',
+            'package_detector_node = base_detection.package_detector_node:main'
         ],
     },
 )

@@ -503,18 +503,14 @@ class CoordinateProcessor(Node):
 
 
 def main(args=None):
+    """Initializes and runs the ROS2 node, with a graceful shutdown."""
     rclpy.init(args=args)
     coordinate_processor = CoordinateProcessor()
-
-    try:
-        rclpy.spin(coordinate_processor)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        # Chama o hook de desligamento antes de destruir o nó
-        coordinate_processor.on_shutdown()
-        coordinate_processor.destroy_node()
-        rclpy.shutdown()
+    
+    rclpy.spin(coordinate_processor)
+    
+    coordinate_processor.on_shutdown()
+    coordinate_processor.destroy_node()
 
 
 if __name__ == "__main__":

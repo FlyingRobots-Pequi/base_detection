@@ -266,15 +266,11 @@ class CoordinateReceiver(Node):
 
 
 def main(args=None):
+    """Initializes and spins the CoordinateReceiver node."""
     rclpy.init(args=args)
-    node = CoordinateReceiver()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    coordinate_receiver = CoordinateReceiver()
+    rclpy.spin(coordinate_receiver)
+    coordinate_receiver.destroy_node()
 
 
 if __name__ == "__main__":
