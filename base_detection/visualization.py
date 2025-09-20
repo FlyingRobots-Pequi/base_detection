@@ -31,6 +31,7 @@ class MarkerManager:
         ground_truth_bases: List[List[float]],
         initial_base_params: InitialBaseParams,
         cluster_labels: np.ndarray = None,
+        drone_position: List[float] = None,
     ):
         """
         Creates and publishes all visualization markers.
@@ -52,6 +53,7 @@ class MarkerManager:
                 ground_truth_bases,
                 initial_base_params,
                 cluster_labels,
+                drone_position,
             )
             self._publisher.publish(markers)
             self._logger.info(f"Published {len(markers.markers)} RViz markers.")
@@ -220,6 +222,29 @@ class MarkerManager:
                 )
             )
 
+    def _add_drone_position_marker(self, markers: MarkerArray, drone_position):
+        """Adds marker for the current drone position."""
+        if drone_position is not None and len(drone_position) >= 3:
+            # Create a drone marker with a distinctive arrow shape
+            markers.markers.append(
+                self._create_marker(
+                    Marker.ARROW,
+                    (drone_position[0], drone_position[1], drone_position[2]),
+                    (1.0, 0.0, 0.0, 1.0),  # Red color
+                    (0.8, 0.2, 0.2),  # Arrow dimensions
+                )
+            )
+            # Add text label for the drone
+            markers.markers.append(
+                self._create_marker(
+                    Marker.TEXT_VIEW_FACING,
+                    (drone_position[0], drone_position[1], drone_position[2] + 0.5),
+                    (1.0, 0.0, 0.0, 1.0),  # Red color
+                    (0.4, 0.4, 0.4),
+                    "DRONE",
+                )
+            )
+
     def _create_visualization_markers(
         self,
         all_positions,
@@ -228,6 +253,7 @@ class MarkerManager:
         ground_truth_bases,
         initial_base_params,
         cluster_labels=None,
+        drone_position=None,
     ):
         """Creates RViz markers for all detected data points and clusters."""
         markers = MarkerArray()
@@ -238,5 +264,6 @@ class MarkerManager:
         self._add_outlier_markers(markers, all_positions, filtered_positions)
         self._add_clustered_point_markers(markers, filtered_positions, cluster_labels)
         self._add_cluster_center_markers(markers, cluster_centers)
+        self._add_drone_position_marker(markers, drone_position)
 
         return markers

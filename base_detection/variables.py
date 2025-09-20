@@ -17,3 +17,4 @@ VEHICLE_LOCAL_POSITION_TOPIC = "/fmu/out/vehicle_local_position"
 # Coordinate Processor
 UNIQUE_POSITIONS_TOPIC = "base_detection/unique_positions"
 CONFIRMED_BASES_TOPIC = "base_detection/confirmed_bases"
+DRONE_POSITION_TOPIC = "base_detection/drone_position"

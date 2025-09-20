@@ -29,6 +29,7 @@ from .variables import (
     VEHICLE_LOCAL_POSITION_TOPIC,
     HIGH_ACCURACY_POINT_TOPIC,
     CONFIRMED_BASES_TOPIC,
+    DRONE_POSITION_TOPIC,
 )
 from .parameters import get_coordinate_processor_params
 from .clustering import run_hybrid_line_kmeans
@@ -58,6 +59,7 @@ class CoordinateProcessor(Node):
         self.drone_position_history = []
         self.max_position_history = 50
         self.initial_clustering_done = False
+        self.current_drone_position = [0.0, 0.0, 0.0]
         
         sensor_qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -86,6 +88,9 @@ class CoordinateProcessor(Node):
         )
         self.confirmed_bases_publisher = self.create_publisher(
             PoseArray, CONFIRMED_BASES_TOPIC, 10
+        )
+        self.drone_position_publisher = self.create_publisher(
+            Point, DRONE_POSITION_TOPIC, 10
         )
 
         # Timer for periodic processing
@@ -160,6 +165,18 @@ class CoordinateProcessor(Node):
     def vehicle_local_position_callback(self, msg: VehicleLocalPosition):
         """Stores vehicle position history to estimate movement direction."""
         current_position = [msg.x, msg.y]
+        
+        # Update current drone position for publishing
+        self.current_drone_position = [msg.x, msg.y, -msg.z]  # Use actual drone altitude
+        
+        # Publish current drone position
+        drone_point = Point(
+            x=self.current_drone_position[0],
+            y=self.current_drone_position[1], 
+            z=self.current_drone_position[2]
+        )
+        self.drone_position_publisher.publish(drone_point)
+        
         if (
             not self.drone_position_history
             or np.linalg.norm(
@@ -234,6 +251,7 @@ class CoordinateProcessor(Node):
                 ground_truth_bases=self.params.ground_truth_bases,
                 initial_base_params=self.params.initial_base,
                 cluster_labels=None,
+                drone_position=self.current_drone_position,
             )
             return
 
@@ -277,6 +295,7 @@ class CoordinateProcessor(Node):
                 ground_truth_bases=self.params.ground_truth_bases,
                 initial_base_params=self.params.initial_base,
                 cluster_labels=None,
+                drone_position=self.current_drone_position,
             )
             return
 
@@ -293,6 +312,7 @@ class CoordinateProcessor(Node):
                 ground_truth_bases=self.params.ground_truth_bases,
                 initial_base_params=self.params.initial_base,
                 cluster_labels=cluster_labels,
+                drone_position=self.current_drone_position,
             )
             self.calculate_detection_accuracy(self.unique_positions)
         except Exception as e:

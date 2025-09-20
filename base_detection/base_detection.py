@@ -13,6 +13,14 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import torch
+from visualization_msgs.msg import Marker, MarkerArray
+from px4_msgs.msg import VehicleLocalPosition
+from rclpy.qos import (
+    QoSProfile,
+    QoSReliabilityPolicy,
+    QoSHistoryPolicy,
+    QoSDurabilityPolicy,
+)
 from base_detection.variables import (
     COLOR_IMAGE_TOPIC,
     INFERRED_IMAGE_TOPIC,
@@ -20,6 +28,7 @@ from base_detection.variables import (
     NUMBER_OF_BASES_TOPIC,
     COLOR_IMAGE_TOPIC2,
     BOOL_DETECTOR_TOPIC,
+    VEHICLE_LOCAL_POSITION_TOPIC,
 )
 from base_detection.parameters import get_image_inferencer_params
 
@@ -54,6 +63,29 @@ class ImageInferencer(Node):
         self.subscription = self.create_subscription(
             Image, COLOR_IMAGE_TOPIC2, self._inferenzzia, 10
         )
+        
+        # Publisher for drone position and trajectory markers
+        self.drone_position_publisher = self.create_publisher(
+            MarkerArray, "/base_detection/markers", 10
+        )
+        
+        # Subscription for vehicle local position
+        qos_profile = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.local_position_sub = self.create_subscription(
+            VehicleLocalPosition, 
+            VEHICLE_LOCAL_POSITION_TOPIC, 
+            self.vehicle_local_position_callback, 
+            qos_profile,
+        )
+        
+        # Drone trajectory storage (keeps all history)
+        self.drone_trajectory = []
+        
         self.bridge = CvBridge()
         self.model = YOLO(self.params.model_path)
 
@@ -61,6 +93,73 @@ class ImageInferencer(Node):
         self.get_logger().info(f"Using device: {device}")
 
         self.model.to(device)
+
+    def vehicle_local_position_callback(self, msg: VehicleLocalPosition):
+        """Callback to update vehicle position and publish drone position marker with trajectory."""
+        # Add current position to trajectory (keeps all history)
+        self.drone_trajectory.append([msg.x, msg.y, -msg.z])  # Use actual drone altitude
+        
+        # Publish drone position and trajectory markers
+        self.publish_drone_position_marker(msg.x, msg.y)
+
+    def publish_drone_position_marker(self, x: float, y: float):
+        """Publishes drone position and trajectory as markers in RViz."""
+        marker_array = MarkerArray()
+        
+        # 1. Current drone position marker
+        drone_marker = Marker()
+        drone_marker.header.frame_id = "map"
+        drone_marker.header.stamp = self.get_clock().now().to_msg()
+        drone_marker.ns = "drone_position"
+        drone_marker.id = 0
+        drone_marker.type = Marker.SPHERE
+        drone_marker.action = Marker.ADD
+        
+        drone_marker.pose.position.x = x
+        drone_marker.pose.position.y = y
+        drone_marker.pose.position.z = self.drone_trajectory[-1][2] if self.drone_trajectory else 0.0
+        drone_marker.pose.orientation.w = 1.0
+        
+        drone_marker.scale.x = 0.3
+        drone_marker.scale.y = 0.3
+        drone_marker.scale.z = 0.3
+        
+        drone_marker.color.r = 0.0
+        drone_marker.color.g = 1.0
+        drone_marker.color.b = 0.0
+        drone_marker.color.a = 0.8
+        
+        marker_array.markers.append(drone_marker)
+        
+        # 2. Trajectory line marker (if we have enough points)
+        if len(self.drone_trajectory) > 1:
+            trajectory_marker = Marker()
+            trajectory_marker.header.frame_id = "map"
+            trajectory_marker.header.stamp = self.get_clock().now().to_msg()
+            trajectory_marker.ns = "drone_trajectory"
+            trajectory_marker.id = 1
+            trajectory_marker.type = Marker.LINE_STRIP
+            trajectory_marker.action = Marker.ADD
+            
+            # Add all trajectory points
+            for point in self.drone_trajectory:
+                from geometry_msgs.msg import Point
+                p = Point()
+                p.x = point[0]
+                p.y = point[1]
+                p.z = point[2]
+                trajectory_marker.points.append(p)
+            
+            trajectory_marker.scale.x = 0.05  # Line width
+            
+            trajectory_marker.color.r = 0.0
+            trajectory_marker.color.g = 0.5
+            trajectory_marker.color.b = 1.0
+            trajectory_marker.color.a = 0.6
+            
+            marker_array.markers.append(trajectory_marker)
+        
+        self.drone_position_publisher.publish(marker_array)
 
     def _inferenzzia(self, data):
         """Callback to process an image, run inference, and publish results."""

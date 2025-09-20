@@ -18,6 +18,7 @@ class ImageInferencerParams:
     model_path: str
     detection_threshold: float
     hsv_filter: HSVFilterParams
+    max_trajectory_points: int = 100
 
 
 @dataclass
