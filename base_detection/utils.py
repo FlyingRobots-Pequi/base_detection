@@ -26,7 +26,7 @@ def detect_outliers_iqr(
 
     outliers_count = np.sum(~mask)
     if outliers_count > 0:
-        logger.info(f"Detected and removing {outliers_count} outliers using IQR method")
+        logger.debug(f"Detected and removing {outliers_count} outliers using IQR method")
 
     return mask
 
@@ -53,7 +53,7 @@ def remove_outliers_2d(points_3d, threshold, logger):
     
     num_outliers = len(points_3d) - np.sum(inliers_mask)
     if num_outliers > 0:
-        logger.info(f"Filtered out {num_outliers} outliers based on Z-score.")
+        logger.debug(f"Filtered out {num_outliers} outliers based on Z-score.")
         
     return points_3d[inliers_mask]
 

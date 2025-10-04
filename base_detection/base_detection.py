@@ -86,6 +86,11 @@ class ImageInferencer(Node):
         # Drone trajectory storage (keeps all history)
         self.drone_trajectory = []
         
+        # Heartbeat timer (log every 2 second)
+        self.frame_count = 0
+        self.detection_count = 0
+        self.create_timer(2.0, self.heartbeat_callback)
+        
         self.bridge = CvBridge()
         self.model = YOLO(self.params.model_path)
 
@@ -93,6 +98,15 @@ class ImageInferencer(Node):
         self.get_logger().info(f"Using device: {device}")
 
         self.model.to(device)
+
+    def heartbeat_callback(self):
+        """Log heartbeat message every second with processing statistics."""
+        self.get_logger().info(
+            f"Base Detection Active - Processed {self.frame_count} frames, "
+            f"Detected bases in {self.detection_count} frames"
+        )
+        self.frame_count = 0
+        self.detection_count = 0
 
     def vehicle_local_position_callback(self, msg: VehicleLocalPosition):
         """Callback to update vehicle position and publish drone position marker with trajectory."""
@@ -173,7 +187,11 @@ class ImageInferencer(Node):
         result = np.zeros_like(img)
         result[mask > 0] = [255, 255, 255]
 
-        results_fly = self.model(result)[0]
+        # Run inference with verbose=False to suppress YOLO logs
+        results_fly = self.model(result, verbose=False)[0]
+        
+        # Update frame counter
+        self.frame_count += 1
 
         frame_detections = []
         for result_fly in results_fly.boxes.data.tolist():
@@ -197,7 +215,8 @@ class ImageInferencer(Node):
                         c_y = int(moments["m01"] / moments["m00"]) + y1
                         center_x, center_y = float(c_x), float(c_y)
                 except Exception as e:
-                    self.get_logger().warn(f"Centroid calculation failed: {e}. Falling back to bbox center.")
+                    # Remove or reduce logging here - only log at debug level
+                    self.get_logger().debug(f"Centroid calculation failed: {e}. Falling back to bbox center.")
                 
                 # Use a tiny bounding box around the centroid for publishing
                 # This ensures the receiver calculates the exact centroid without changing message format.
@@ -233,12 +252,14 @@ class ImageInferencer(Node):
 
         # Publish coordinates only if detections were made
         if frame_detections:
+            self.detection_count += 1
             coord_msg = Float32MultiArray()
             flat_detections = [
                 item for detection in frame_detections for item in detection
             ]
             coord_msg.data = flat_detections
             self.coord_publisher.publish(coord_msg)
+            # Remove verbose logging - only use debug level
             self.get_logger().debug(
                 f"Published {len(frame_detections)} detections in batch"
             )

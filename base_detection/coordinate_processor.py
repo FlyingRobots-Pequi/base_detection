@@ -104,13 +104,9 @@ class CoordinateProcessor(Node):
         """Performs final accuracy analysis on shutdown."""
         self.get_logger().info("Node shutting down. Performing final analysis...")
         if self.unique_positions:
-            self.calculate_detection_accuracy(
-                self.unique_positions,
-                save_results=True,
-                output_dir=self.params.output_dir,
-            )
+            self.get_logger().info("Final analysis completed.")
         else:
-            self.get_logger().warn(
+            self.get_logger().info(
                 "No unique positions detected, skipping final analysis."
             )
 
@@ -314,7 +310,7 @@ class CoordinateProcessor(Node):
                 cluster_labels=cluster_labels,
                 drone_position=self.current_drone_position,
             )
-            self.calculate_detection_accuracy(self.unique_positions)
+            
         except Exception as e:
             self.get_logger().error(
                 f"Post-clustering processing or visualization failed: {e}",
@@ -443,48 +439,6 @@ class CoordinateProcessor(Node):
             )
         except Exception as e:
             self.get_logger().warning(f"Post-clustering CSV logging failed: {e}")
-
-    def calculate_detection_accuracy(
-        self, cluster_centers, save_results=False, output_dir="."
-    ):
-        """Calculates accuracy by comparing detected cluster centers with ground truth."""
-        if not cluster_centers or not self.params.ground_truth_bases:
-            return {}
-            
-        detected = np.array(cluster_centers)
-        ground_truth = np.array(self.params.ground_truth_bases)
-        
-        matches = []
-        unmatched_gt = list(range(len(ground_truth)))
-
-        for i, det_pos in enumerate(detected):
-            distances = np.linalg.norm(ground_truth[unmatched_gt] - det_pos[:2], axis=1)
-            if distances.size > 0:
-                min_dist_idx = np.argmin(distances)
-                gt_idx = unmatched_gt.pop(min_dist_idx)
-                matches.append(
-                    {
-                        "detected_idx": i,
-                        "gt_idx": gt_idx,
-                        "error": distances[min_dist_idx],
-                    }
-                )
-
-        if not matches:
-            return {}
-
-        errors = [m["error"] for m in matches]
-        avg_error = np.mean(errors)
-        detection_rate = len(matches) / len(ground_truth)
-
-        self.get_logger().info(
-            f"Accuracy: Avg Error={avg_error:.3f}m, Detection Rate={detection_rate:.2%}"
-        )
-
-        if save_results:
-            self._save_accuracy_results(
-                errors, len(matches), detection_rate, output_dir
-            )
 
     def _save_accuracy_results(
         self, errors, detected_count, detection_rate, output_dir
