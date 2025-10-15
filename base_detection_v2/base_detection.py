@@ -6,7 +6,7 @@ import message_filters
 
 # ros messages
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, PointArray
 from visualization_msgs.msg import Marker, MarkerArray
 from px4_msgs.msg import VehicleLocalPosition
 
@@ -66,6 +66,9 @@ class ImageInferencer(Node):
         self.drone_position_publisher = self.create_publisher(
             MarkerArray, "/base_detection/markers", 10
         )
+
+        #create base publisher
+        self.base_publisher = self.create_publisher(PointArray, "/base_detection/bases", 10)
         
         # Subscription for vehicle local position
         qos_profile = QoSProfile(
@@ -289,7 +292,17 @@ class ImageInferencer(Node):
                         arr[valid_pos] = point_3d
                         valid_pos += 1
 
+                    bases = PointArray()
+                    for i in range(valid_pos):
+                        p = Point()
+                        p.x = float(arr[i][0])
+                        p.y = float(arr[i][1])
+                        p.z = float(arr[i][2])
+                        bases.points.append(p)
                     
+
+                    self.base_publisher.publish(bases)
+
                 self.get_logger().info(f"Detected 3D Point: {point_3d}")
             
         # inferred_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
