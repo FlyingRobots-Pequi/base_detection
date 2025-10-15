@@ -44,6 +44,10 @@ class ImageInferencer(Node):
         self.hsv_filter_lower = np.array([42, 30, 120])
         self.hsv_filter_upper = np.array([135, 190, 220])
 
+        self.arr = np.zeros((30, 3))
+        self.valid_pos = 0
+
+        self.cluster_thresholds = 1.0
         
         #create d455 config subscriber
         self.k_sub = self.create_subscription(CameraInfo, "/camera/color/camera_info", self.intrinsics_callback, 10)
@@ -242,8 +246,6 @@ class ImageInferencer(Node):
 
         # get 3d points coordinates
 
-        arr = np.zeros((30, 3))
-        valid_pos = 0
         if frame_detections:
             depth_img = self.bridge.imgmsg_to_cv2(depth_data, desired_encoding='32FC1')
             depth_img_resized = cv2.resize(
@@ -258,46 +260,47 @@ class ImageInferencer(Node):
                 depth = depth_img_resized[v, u]
 
                 # Convert to 3D poin
-                if valid_pos == 0:
+                if self.valid_pos == 0:
                     camera_frame_3d = self.get_points_to_3d(u, v, depth)
                     x_b = -camera_frame_3d[1] - 0.13
                     y_b = -camera_frame_3d[0] - 0.05
                     z_b = -camera_frame_3d[2]
 
-                    x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.yaw) - y_b * np.sin(self.actual_position.yaw))
-                    y_world = self.actual_position.y + (x_b * np.sin(self.actual_position.yaw) + y_b * np.cos(self.actual_position.yaw))
+                    x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.heading) - y_b * np.sin(self.actual_position.heading))
+                    y_world = self.actual_position.y + (x_b * np.sin(self.actual_position.heading) + y_b * np.cos(self.actual_position.heading))
                     z_world = self.actual_position.z - z_b
                     point_3d = (x_world, y_world, z_world)
                     self.get_logger().info(f"Base Position in World Frame: X: {x_world:.3f}m, Y: {y_world:.3f}m, Z: {z_world:.3f}m")
 
-                    arr[valid_pos] = point_3d
-                    valid_pos += 1
+                    self.arr[self.valid_pos] = point_3d
+                    self.valid_pos += 1
                 else:
                     camera_frame_3d = self.get_points_to_3d(u, v, depth)
                     x_b = -camera_frame_3d[1] - 0.13
                     y_b = -camera_frame_3d[0] - 0.05
                     z_b = -camera_frame_3d[2]
 
-                    x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.yaw) - y_b * np.sin(self.actual_position.yaw))
-                    y_world = self.actual_position.y + (x_b * np.sin(self.actual_position.yaw) + y_b * np.cos(self.actual_position.yaw))
+                    x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.heading) - y_b * np.sin(self.actual_position.heading))
+                    y_world = self.actual_position.y + (x_b * np.sin(self.actual_position.heading) + y_b * np.cos(self.actual_position.heading))
                     z_world = self.actual_position.z + z_b
                     point_3d = (x_world, y_world, z_world)
 
-                    aux =  arr[0:valid_pos] - np.array(point_3d)
-                    aux = aux**2
-                    mask = aux < self.cluster_thresholds
-                    if mask:
-                        arr[mask] = (arr[mask] + aux[mask])/2
+                    distances = np.linalg.norm(self.arr[:valid_pos] - np.array(point_3d), axis=1)
+                    min_dist = np.min(distances)
+                    if min_dist < self.cluster_thresholds:
+                        idx = np.argmin(distances)
+                        self.arr[idx] = (self.arr[idx] + np.array(point_3d)) / 2
+                        
                     else:
-                        arr[valid_pos] = point_3d
+                        self.arr[valid_pos] = point_3d
                         valid_pos += 1
 
                     bases = PointArray()
-                    for i in range(valid_pos):
+                    for i in range(self.valid_pos):
                         p = Point()
-                        p.x = float(arr[i][0])
-                        p.y = float(arr[i][1])
-                        p.z = float(arr[i][2])
+                        p.x = float(self.arr[i][0])
+                        p.y = float(self.arr[i][1])
+                        p.z = float(self.arr[i][2])
                         bases.points.append(p)
                     
 
@@ -355,5 +358,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     main()
