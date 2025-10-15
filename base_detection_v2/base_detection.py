@@ -6,7 +6,7 @@ import message_filters
 
 # ros messages
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, PoseArray, Pose
 from visualization_msgs.msg import Marker, MarkerArray
 from px4_msgs.msg import VehicleLocalPosition
 
@@ -25,6 +25,9 @@ from rclpy.qos import (
     QoSDurabilityPolicy,
 )
 
+# realsense dep
+import pyrealsense2 as rs
+
 class ImageInferencer(Node):
     """
     ROS2 node for real-time base detection.
@@ -33,7 +36,7 @@ class ImageInferencer(Node):
     coordinates and a visualization image.
     """
 
-    def _init_(self):
+    def __init__(self):
         """Initializes the node, publishers, subscription, and YOLO model."""
         super()._init_("Drone_Base_Detection")
         self.get_logger().info("Base Detection Node Initialized")
@@ -44,18 +47,19 @@ class ImageInferencer(Node):
         self.hsv_filter_lower = np.array([42, 30, 120])
         self.hsv_filter_upper = np.array([135, 190, 220])
 
-        
-        #create d455 config subscriber
-        self.k_sub = self.create_subscription(CameraInfo, "/camera/color/camera_info", self.intrinsics_callback, 10)
-        self.camera_intrinsics = None
+        self.arr = np.zeros((30, 3))
+        self.valid_pos = 0
 
-        # create d455 depth and image sub 
-        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/depth/depth_image")
-        self.image_sub = message_filters.Subscriber(self, Image, "/camera/color/image_raw")
+        # Synchronized subs
+        self.color_sub = message_filters.Subscriber(self, Image, '/camera/color/image_raw')
+        self.depth_sub = message_filters.Subscriber(self, Image, '/camera/aligned_depth_to_color/image_raw')
+        self.info_sub = message_filters.Subscriber(self, CameraInfo, '/camera/aligned_depth_to_color/camera_info')
+
+        self.intrinsics = None
 
         #time sincronizer
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.image_sub, self.depth_sub], 
+            [self.color_sub, self.depth_sub, self.info_sub], 
             queue_size=10, 
             slop=0.1
             )
@@ -66,6 +70,9 @@ class ImageInferencer(Node):
         self.drone_position_publisher = self.create_publisher(
             MarkerArray, "/base_detection/markers", 10
         )
+
+        #create base publisher
+        self.base_publisher = self.create_publisher(PoseArray, "/base_detection/bases", 10)
         
         # Subscription for vehicle local position
         qos_profile = QoSProfile(
@@ -176,7 +183,7 @@ class ImageInferencer(Node):
         
         self.drone_position_publisher.publish(marker_array)
 
-    def _inferenzzia(self, color_data, depth_data):
+    def _inferenzzia(self, color_data, depth_data, info_data):
         """Callback to process an image, run inference, and publish results."""
         img = self.bridge.imgmsg_to_cv2(color_data, desired_encoding="bgr8")
 
@@ -238,62 +245,78 @@ class ImageInferencer(Node):
                 )
 
         # get 3d points coordinates
+        if self.intrinsics is None:
+                self.intrinsics = rs.intrinsics()
+                self.intrinsics.width = info_data.width
+                self.intrinsics.height = info_data.height
+                self.intrinsics.ppx, self.intrinsics.ppy = info_data.k[2], info_data.k[5]
+                self.intrinsics.fx, self.intrinsics.fy = info_data.k[0], info_data.k[4]
+                self.intrinsics.model = rs.distortion.none
+                self.get_logger().info(f'Intrínsecos da câmera recebidos: {self.intrinsics}')
 
-        arr = np.zeros((30, 3))
-        valid_pos = 0
         if frame_detections:
             depth_img = self.bridge.imgmsg_to_cv2(depth_data, desired_encoding='32FC1')
-            depth_img_resized = cv2.resize(
-                depth_img, 
-                (1280, 720),         # Dimensões alvo (largura, altura)
-                interpolation=cv2.INTER_NEAREST # Método de interpolação correto para profundidade
-            )
 
             for detection in frame_detections:
                 u = int((detection[0] + detection[2]) / 2)
                 v = int((detection[1] + detection[3]) / 2)
-                depth = depth_img_resized[v, u]
+                depth = depth_img[v, u]
 
-                # Convert to 3D poin
-                if valid_pos == 0:
-                    camera_frame_3d = self.get_points_to_3d(u, v, depth)
-                    x_b = -camera_frame_3d[1] - 0.13
-                    y_b = -camera_frame_3d[0] - 0.05
-                    z_b = -camera_frame_3d[2]
+                # Convert to 3D point
+                if self.valid_pos == 0:
+                    camera_frame_3d = point_3d = rs.rs2_deproject_pixel_to_point(
+                        self.intrinsics, [u, v], depth
+                    )
+                    x_b = 0.13 - camera_frame_3d[1]
+                    y_b = -camera_frame_3d[0]
+                    z_b = 0.05 - camera_frame_3d[2]
 
-                    x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.yaw) - y_b * np.sin(self.actual_position.yaw))
-                    y_world = self.actual_position.y + (x_b * np.sin(self.actual_position.yaw) + y_b * np.cos(self.actual_position.yaw))
+                    x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.heading) - y_b * np.sin(self.actual_position.heading))
+                    y_world = self.actual_position.y + (x_b * np.sin(self.actual_position.heading) + y_b * np.cos(self.actual_position.heading))
                     z_world = self.actual_position.z - z_b
                     point_3d = (x_world, y_world, z_world)
                     self.get_logger().info(f"Base Position in World Frame: X: {x_world:.3f}m, Y: {y_world:.3f}m, Z: {z_world:.3f}m")
 
-                    arr[valid_pos] = point_3d
-                    valid_pos += 1
+                    self.arr[self.valid_pos] = point_3d
+                    self.valid_pos += 1
                 else:
-                    camera_frame_3d = self.get_points_to_3d(u, v, depth)
-                    x_b = -camera_frame_3d[1] - 0.13
-                    y_b = -camera_frame_3d[0] - 0.05
-                    z_b = -camera_frame_3d[2]
+                    camera_frame_3d = rs.rs2_deproject_pixel_to_point(
+                        self.intrinsics, [u, v], depth
+                    )
+                    x_b = 0.13 - camera_frame_3d[1]
+                    y_b = -camera_frame_3d[0]
+                    z_b = 0.05 - camera_frame_3d[2]
 
                     x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.yaw) - y_b * np.sin(self.actual_position.yaw))
                     y_world = self.actual_position.y + (x_b * np.sin(self.actual_position.yaw) + y_b * np.cos(self.actual_position.yaw))
                     z_world = self.actual_position.z + z_b
                     point_3d = (x_world, y_world, z_world)
 
-                    aux =  arr[0:valid_pos] - np.array(point_3d)
-                    aux = aux**2
-                    mask = aux < self.cluster_thresholds
-                    if mask:
-                        arr[mask] = (arr[mask] + aux[mask])/2
+                    distances = np.linalg.norm(self.arr[:valid_pos] - np.array(point_3d), axis=1)
+                    min_dist = np.min(distances)
+                    if min_dist < self.cluster_thresholds:
+                        idx = np.argmin(distances)
+                        self.arr[idx] = (self.arr[idx] + np.array(point_3d)) / 2
+                        
                     else:
-                        arr[valid_pos] = point_3d
+                        self.arr[valid_pos] = point_3d
                         valid_pos += 1
 
-                    
+                    bases = PoseArray()
+                    for i in range(self.valid_pos):
+                        p = Pose()
+                        p.position.x = float(self.arr[i][0])
+                        p.position.y = float(self.arr[i][1])
+                        p.position.z = float(self.arr[i][2])
+                        bases.poses.append(p)
+
+                    self.base_publisher.publish(bases)
+
                 self.get_logger().info(f"Detected 3D Point: {point_3d}")
             
         # inferred_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
-
+    
+    # unused
     def get_points_to_3d(self, x, y, depth):
         if depth <= 0.0 or np.isnan(depth) or np.isinf(depth):
             self.get_logger().error(f"invalid depth ==> value: {depth}")
@@ -314,7 +337,7 @@ class ImageInferencer(Node):
         )
 
         return (X, Y, Z)
-    
+    # unsused
     def intrinsics_callback(self, msg):
         self.camera_intrinsics = {
             'fx': msg.k[0],
@@ -342,5 +365,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     main()
