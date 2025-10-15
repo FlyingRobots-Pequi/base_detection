@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'base_detection_v2'
+package_name = 'base_detection'
 
 setup(
     name=package_name,
@@ -27,6 +27,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'base_detection = base_detection.base_detection:main'
         ],
     },
 )
