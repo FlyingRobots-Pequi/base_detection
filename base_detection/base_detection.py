@@ -272,6 +272,8 @@ class ImageInferencer(Node):
                 # Convert to 3D poin
                 if self.valid_pos == 0:
                     camera_frame_3d = self.get_points_to_3d(u, v, depth)
+                    if camera_frame_3d is None:
+                        continue
 
                     self.get_logger().info(f"CAMERA FRAME 3D: {camera_frame_3d}")
 
@@ -290,6 +292,8 @@ class ImageInferencer(Node):
                 else:
 
                     camera_frame_3d = self.get_points_to_3d(u, v, depth)
+                    if camera_frame_3d is None:
+                        continue
 
                     self.get_logger().info(f"CAMERA FRAME 3D: {camera_frame_3d}")
 
