@@ -71,6 +71,7 @@ class ImageInferencer(Node):
         )
         
         self.base_publisher = self.create_publisher(PoseArray, "/base_detection/bases", 10)
+        self.debug_image_publisher = self.create_publisher(Image, "/base_detection/debug_image", 10)
 
         # Subscription for vehicle local position
         qos_profile = QoSProfile(
@@ -181,7 +182,33 @@ class ImageInferencer(Node):
             trajectory_marker.color.a = 0.6
             
             marker_array.markers.append(trajectory_marker)
-        
+
+        # 3. Detected base markers
+        for i in range(self.valid_pos):
+            base_marker = Marker()
+            base_marker.header.frame_id = "map"
+            base_marker.header.stamp = self.get_clock().now().to_msg()
+            base_marker.ns = "detected_bases"
+            base_marker.id = i
+            base_marker.type = Marker.CYLINDER
+            base_marker.action = Marker.ADD
+
+            base_marker.pose.position.x = float(self.arr[i][0])
+            base_marker.pose.position.y = float(self.arr[i][1])
+            base_marker.pose.position.z = float(self.arr[i][2])
+            base_marker.pose.orientation.w = 1.0
+
+            base_marker.scale.x = 0.3
+            base_marker.scale.y = 0.3
+            base_marker.scale.z = 0.05
+
+            base_marker.color.r = 1.0
+            base_marker.color.g = 0.6
+            base_marker.color.b = 0.0
+            base_marker.color.a = 0.9
+
+            marker_array.markers.append(base_marker)
+
         self.drone_position_publisher.publish(marker_array)
 
     def _inferenzzia(self, color_data, depth_data, info_data):
@@ -275,7 +302,7 @@ class ImageInferencer(Node):
                     if camera_frame_3d is None:
                         continue
 
-                    self.get_logger().info(f"CAMERA FRAME 3D: {camera_frame_3d}")
+                    self.get_logger().debug(f"CAMERA FRAME 3D: {camera_frame_3d}")
 
                     x_b = -camera_frame_3d[1] + 0.13
                     y_b = -camera_frame_3d[0]
@@ -295,7 +322,7 @@ class ImageInferencer(Node):
                     if camera_frame_3d is None:
                         continue
 
-                    self.get_logger().info(f"CAMERA FRAME 3D: {camera_frame_3d}")
+                    self.get_logger().debug(f"CAMERA FRAME 3D: {camera_frame_3d}")
 
                     x_b = -camera_frame_3d[1] + 0.13
                     y_b = -camera_frame_3d[0]
@@ -335,15 +362,17 @@ class ImageInferencer(Node):
 
                     self.base_publisher.publish(bases)                    
                                         
-                self.get_logger().info(f"Detected 3D Point: {point_3d}")
-            
-        # inferred_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
+                self.get_logger().debug(f"Detected 3D Point: {point_3d}")
+
+        debug_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
+        debug_image_msg.header = color_data.header
+        self.debug_image_publisher.publish(debug_image_msg)
 
     def get_points_to_3d(self, x, y, depth):
         if depth <= 0.0 or np.isnan(depth) or np.isinf(depth):
-            self.get_logger().error(f"invalid depth ==> value: {depth}")
+            self.get_logger().error(f"invalid depth ==> value: {depth}", throttle_duration_sec=2.0)
             return
-        
+
         fx = self.camera_intrinsics['fx']
         fy = self.camera_intrinsics['fy']
         cx = self.camera_intrinsics['cx']
@@ -352,8 +381,8 @@ class ImageInferencer(Node):
         Z = float(depth)
         X = (x - cx) * Z / fx
         Y = (y - cy) * Z / fy
-        
-        self.get_logger().info(
+
+        self.get_logger().debug(
             f"Ponto 3D para o pixel ({x}, {y}) | Profundidade: {Z:.3f}m -> "
             f"[X: {X:.3f}m, Y: {Y:.3f}m, Z: {Z:.3f}m]"
         )
