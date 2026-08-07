@@ -2,11 +2,13 @@
 # rclpy
 import rclpy
 from rclpy.node import Node
-import message_filters 
+from rclpy.time import Time
+import tf2_ros
+from tf2_geometry_msgs import do_transform_point
 
 # ros messages
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import Point, Pose, PoseArray
+from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray
 from visualization_msgs.msg import Marker, MarkerArray
 from px4_msgs.msg import VehicleLocalPosition
 
@@ -47,24 +49,22 @@ class ImageInferencer(Node):
         self.arr = np.zeros((30, 3))
         self.valid_pos = 0
 
-        #create d455 config subscriber
-        #self.k_sub = self.create_subscription(CameraInfo, "/camera/color/camera_info", self.intrinsics_callback, 10)
+        # downward_rgb_camera (hermit/model.sdf): mounted 0.24m below
+        # base_link, pitched 90 deg to look straight down. No depth needed:
+        # each pixel's ray is cast in camera_down_optical_frame and
+        # intersected with the ground plane (Z=0 in "map") using the real
+        # TF2 chain map->base_link->camera_down_optical_frame -- that chain
+        # already carries the drone's full attitude/position, so this is
+        # robust without any hand-rolled heading trig. Assumes the target is
+        # on the ground; fine for landing (only ground-level bases are
+        # landable), not for the elevated bases.
         self.camera_intrinsics = None
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # create d455 depth and image sub 
-        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/depth/depth_image")
-        self.image_sub = message_filters.Subscriber(self, Image, "/camera/color/image_raw")
-        self.k_sub = message_filters.Subscriber(self, CameraInfo, "/camera/color/camera_info")
+        self.k_sub = self.create_subscription(CameraInfo, "/camera/down/camera_info", self.intrinsics_callback, 10)
+        self.image_sub = self.create_subscription(Image, "/camera/down/image", self._inferenzzia, 10)
 
-        #time sincronizer
-        self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.image_sub, self.depth_sub, self.k_sub], 
-            queue_size=10, 
-            slop=0.1
-            )
-        
-        self.ts.registerCallback(self._inferenzzia)
-        
         # Publisher for drone position and trajectory markers
         self.drone_position_publisher = self.create_publisher(
             MarkerArray, "/base_detection/markers", 10
@@ -211,7 +211,7 @@ class ImageInferencer(Node):
 
         self.drone_position_publisher.publish(marker_array)
 
-    def _inferenzzia(self, color_data, depth_data, info_data):
+    def _inferenzzia(self, color_data):
         """Callback to process an image, run inference, and publish results."""
         img = self.bridge.imgmsg_to_cv2(color_data, desired_encoding="bgr8")
 
@@ -272,67 +272,24 @@ class ImageInferencer(Node):
                     cv2.LINE_AA,
                 )
 
-        # get 3d points coordinates
-
-        if self.camera_intrinsics == None:
-            self.camera_intrinsics = {
-            'fx': info_data.k[0],
-            'fy': info_data.k[4],
-            'cx': info_data.k[2],
-            'cy': info_data.k[5]
-        }
-
-        
         if frame_detections:
-            depth_img = self.bridge.imgmsg_to_cv2(depth_data, desired_encoding='32FC1')
-            depth_img_resized = cv2.resize(
-                depth_img, 
-                (1280, 720),         # Dimensões alvo (largura, altura)
-                interpolation=cv2.INTER_NEAREST # Método de interpolação correto para profundidade
-            )
+            self.detection_count += 1
 
+        # get 3d points coordinates via ground-plane intersection (no depth sensor)
+        if frame_detections and self.camera_intrinsics is not None:
             for detection in frame_detections:
                 u = int((detection[0] + detection[2]) / 2)
                 v = int((detection[1] + detection[3]) / 2)
-                depth = depth_img_resized[v, u]
 
-                # Convert to 3D poin
+                point_3d = self.get_points_to_3d(u, v)
+                if point_3d is None:
+                    continue
+
                 if self.valid_pos == 0:
-                    camera_frame_3d = self.get_points_to_3d(u, v, depth)
-                    if camera_frame_3d is None:
-                        continue
-
-                    self.get_logger().debug(f"CAMERA FRAME 3D: {camera_frame_3d}")
-
-                    x_b = -camera_frame_3d[1] + 0.13
-                    y_b = -camera_frame_3d[0]
-                    z_b = -camera_frame_3d[2] + 0.05
-
-                    x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.heading) - y_b * np.sin(self.actual_position.heading))
-                    y_world = self.actual_position.y - (x_b * np.sin(self.actual_position.heading) + y_b * np.cos(self.actual_position.heading))
-                    z_world = self.actual_position.z - z_b
-                    point_3d = (x_world, y_world, z_world)
-                    self.get_logger().info(f"Base Position in World Frame: X: {x_world:.3f}m, Y: {y_world:.3f}m, Z: {z_world:.3f}m")
-
+                    self.get_logger().info(f"Base Position in World Frame: X: {point_3d[0]:.3f}m, Y: {point_3d[1]:.3f}m, Z: {point_3d[2]:.3f}m")
                     self.arr[self.valid_pos] = point_3d
                     self.valid_pos += 1
                 else:
-
-                    camera_frame_3d = self.get_points_to_3d(u, v, depth)
-                    if camera_frame_3d is None:
-                        continue
-
-                    self.get_logger().debug(f"CAMERA FRAME 3D: {camera_frame_3d}")
-
-                    x_b = -camera_frame_3d[1] + 0.13
-                    y_b = -camera_frame_3d[0]
-                    z_b = -camera_frame_3d[2] + 0.05
-
-                    x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.heading) - y_b * np.sin(self.actual_position.heading))
-                    y_world = self.actual_position.y - (x_b * np.sin(self.actual_position.heading) + y_b * np.cos(self.actual_position.heading))
-                    z_world = self.actual_position.z - z_b
-                    point_3d = (x_world, y_world, z_world)
-
                     # Define limite de 1 metro (para XY apenas)
                     distance_threshold_xy = 1.0  
 
@@ -349,58 +306,105 @@ class ImageInferencer(Node):
                         self.arr[self.valid_pos] = point_3d
                         self.valid_pos += 1
 
-                    bases = PoseArray()
-                    bases.header.stamp = self.get_clock().now().to_msg()
-                    bases.header.frame_id = "map"
-                    for i in range(self.valid_pos):
-                        pose = Pose()
-                        pose.position.x = float(self.arr[i][0])
-                        pose.position.y = float(self.arr[i][1])
-                        pose.position.z = float(self.arr[i][2])
-                        pose.orientation.w = 1.0  # orientação neutra
-                        bases.poses.append(pose)
+                bases = PoseArray()
+                bases.header.stamp = self.get_clock().now().to_msg()
+                bases.header.frame_id = "map"
+                for i in range(self.valid_pos):
+                    pose = Pose()
+                    pose.position.x = float(self.arr[i][0])
+                    pose.position.y = float(self.arr[i][1])
+                    pose.position.z = float(self.arr[i][2])
+                    pose.orientation.w = 1.0  # orientação neutra
+                    bases.poses.append(pose)
 
-                    self.base_publisher.publish(bases)                    
-                                        
+                self.base_publisher.publish(bases)
+
                 self.get_logger().debug(f"Detected 3D Point: {point_3d}")
 
         debug_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
         debug_image_msg.header = color_data.header
         self.debug_image_publisher.publish(debug_image_msg)
 
-    def get_points_to_3d(self, x, y, depth):
-        if depth <= 0.0 or np.isnan(depth) or np.isinf(depth):
-            self.get_logger().error(f"invalid depth ==> value: {depth}", throttle_duration_sec=2.0)
-            return
+    def get_points_to_3d(self, u, v):
+        """Back-projects a down-camera pixel onto the ground plane (Z=0 in "map"), no depth sensor.
 
+        Casts the pixel's ray in camera_down_optical_frame and transforms
+        both the camera origin and a point along the ray into "map" via TF2
+        (map->base_link->camera_down_optical_frame), then intersects that
+        ray with Z=0. TF already carries the drone's real attitude/position,
+        so this is robust without hand-rolled heading trig. Assumes the
+        target sits on the ground -- correct for landing on ground-level
+        bases, not for the elevated ones.
+        """
         fx = self.camera_intrinsics['fx']
         fy = self.camera_intrinsics['fy']
         cx = self.camera_intrinsics['cx']
         cy = self.camera_intrinsics['cy']
 
-        Z = float(depth)
-        X = (x - cx) * Z / fx
-        Y = (y - cy) * Z / fy
+        x_opt = (u - cx) / fx
+        y_opt = (v - cy) / fy
+
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                "map", "camera_down_optical_frame", Time()
+            )
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+            self.get_logger().warn(f"TF map<-camera_down_optical_frame indisponível: {e}", throttle_duration_sec=2.0)
+            return None
+
+        origin_camera = PointStamped()
+        origin_camera.header.frame_id = "camera_down_optical_frame"
+        origin_camera.point.x = 0.0
+        origin_camera.point.y = 0.0
+        origin_camera.point.z = 0.0
+
+        ray_camera = PointStamped()
+        ray_camera.header.frame_id = "camera_down_optical_frame"
+        ray_camera.point.x = x_opt
+        ray_camera.point.y = y_opt
+        ray_camera.point.z = 1.0
+
+        origin_map = do_transform_point(origin_camera, transform).point
+        ray_map = do_transform_point(ray_camera, transform).point
+
+        direction = np.array([
+            ray_map.x - origin_map.x,
+            ray_map.y - origin_map.y,
+            ray_map.z - origin_map.z,
+        ])
+
+        # Ray has to actually point toward the ground (Z decreasing) to hit Z=0.
+        if direction[2] >= 0.0:
+            self.get_logger().warn(
+                "Raio da câmera não aponta pro chão (attitude estranha?)",
+                throttle_duration_sec=2.0,
+            )
+            return None
+
+        t = -origin_map.z / direction[2]
+        if t <= 0.0:
+            return None
+
+        x_world = origin_map.x + t * direction[0]
+        y_world = origin_map.y + t * direction[1]
+        z_world = 0.0
 
         self.get_logger().debug(
-            f"Ponto 3D para o pixel ({x}, {y}) | Profundidade: {Z:.3f}m -> "
-            f"[X: {X:.3f}m, Y: {Y:.3f}m, Z: {Z:.3f}m]"
+            f"Ponto no chão para o pixel ({u}, {v}) -> "
+            f"[X: {x_world:.3f}m, Y: {y_world:.3f}m, Z: {z_world:.3f}m]"
         )
 
-        return (X, Y, Z)
-    
+        return (x_world, y_world, z_world)
+
     def intrinsics_callback(self, msg):
         self.camera_intrinsics = {
             'fx': msg.k[0],
             'fy': msg.k[4],
             'cx': msg.k[2],
-            'cy': msg.k[5]
+            'cy': msg.k[5],
         }
         self.get_logger().info(f"Camera intrinsics received: {self.camera_intrinsics}")
-        # Unsubscribe after receiving the intrinsics once
-        self.k_sub  # keep a reference to avoid garbage collection
         self.destroy_subscription(self.k_sub)
-        self.get_logger().info("Unsubscribed from camera intrinsics topic.")
 
 def main(args=None):
     """Initializes and runs the ROS2 node."""
