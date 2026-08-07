@@ -6,8 +6,7 @@ import message_filters
 
 # ros messages
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import PoseArray, Pose
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, Pose, PoseArray
 from visualization_msgs.msg import Marker, MarkerArray
 from px4_msgs.msg import VehicleLocalPosition
 
@@ -45,18 +44,21 @@ class ImageInferencer(Node):
         self.hsv_filter_lower = np.array([42, 30, 120])
         self.hsv_filter_upper = np.array([135, 190, 220])
 
-        
+        self.arr = np.zeros((30, 3))
+        self.valid_pos = 0
+
         #create d455 config subscriber
-        self.k_sub = self.create_subscription(CameraInfo, "/camera/color/camera_info", self.intrinsics_callback, 10)
+        #self.k_sub = self.create_subscription(CameraInfo, "/camera/color/camera_info", self.intrinsics_callback, 10)
         self.camera_intrinsics = None
 
         # create d455 depth and image sub 
         self.depth_sub = message_filters.Subscriber(self, Image, "/camera/depth/depth_image")
         self.image_sub = message_filters.Subscriber(self, Image, "/camera/color/image_raw")
+        self.k_sub = message_filters.Subscriber(self, CameraInfo, "/camera/color/camera_info")
 
         #time sincronizer
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.image_sub, self.depth_sub], 
+            [self.image_sub, self.depth_sub, self.k_sub], 
             queue_size=10, 
             slop=0.1
             )
@@ -68,7 +70,6 @@ class ImageInferencer(Node):
             MarkerArray, "/base_detection/markers", 10
         )
         
-        #create base publisher
         self.base_publisher = self.create_publisher(PoseArray, "/base_detection/bases", 10)
 
         # Subscription for vehicle local position
@@ -102,7 +103,7 @@ class ImageInferencer(Node):
 
         self.model.to(device)
 
-        self.cluster_thresholds = 1.0
+        self.cluster_thresholds = 0.45
 
 
     def heartbeat_callback(self):
@@ -183,7 +184,7 @@ class ImageInferencer(Node):
         
         self.drone_position_publisher.publish(marker_array)
 
-    def _inferenzzia(self, color_data, depth_data):
+    def _inferenzzia(self, color_data, depth_data, info_data):
         """Callback to process an image, run inference, and publish results."""
         img = self.bridge.imgmsg_to_cv2(color_data, desired_encoding="bgr8")
 
@@ -246,8 +247,15 @@ class ImageInferencer(Node):
 
         # get 3d points coordinates
 
-        arr = np.zeros((30, 3))
-        valid_pos = 0
+        if self.camera_intrinsics == None:
+            self.camera_intrinsics = {
+            'fx': info_data.k[0],
+            'fy': info_data.k[4],
+            'cx': info_data.k[2],
+            'cy': info_data.k[5]
+        }
+
+        
         if frame_detections:
             depth_img = self.bridge.imgmsg_to_cv2(depth_data, desired_encoding='32FC1')
             depth_img_resized = cv2.resize(
@@ -262,53 +270,69 @@ class ImageInferencer(Node):
                 depth = depth_img_resized[v, u]
 
                 # Convert to 3D poin
-                if valid_pos == 0:
+                if self.valid_pos == 0:
                     camera_frame_3d = self.get_points_to_3d(u, v, depth)
-                    x_b = -camera_frame_3d[1] - 0.13
-                    y_b = -camera_frame_3d[0] - 0.05
-                    z_b = -camera_frame_3d[2]
+
+                    self.get_logger().info(f"CAMERA FRAME 3D: {camera_frame_3d}")
+
+                    x_b = -camera_frame_3d[1] + 0.13
+                    y_b = -camera_frame_3d[0]
+                    z_b = -camera_frame_3d[2] + 0.05
 
                     x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.heading) - y_b * np.sin(self.actual_position.heading))
-                    y_world = self.actual_position.y + (x_b * np.sin(self.actual_position.heading) + y_b * np.cos(self.actual_position.heading))
+                    y_world = self.actual_position.y - (x_b * np.sin(self.actual_position.heading) + y_b * np.cos(self.actual_position.heading))
                     z_world = self.actual_position.z - z_b
                     point_3d = (x_world, y_world, z_world)
                     self.get_logger().info(f"Base Position in World Frame: X: {x_world:.3f}m, Y: {y_world:.3f}m, Z: {z_world:.3f}m")
 
-                    arr[valid_pos] = point_3d
-                    valid_pos += 1
+                    self.arr[self.valid_pos] = point_3d
+                    self.valid_pos += 1
                 else:
+
                     camera_frame_3d = self.get_points_to_3d(u, v, depth)
-                    x_b = -camera_frame_3d[1] - 0.13
-                    y_b = -camera_frame_3d[0] - 0.05
-                    z_b = -camera_frame_3d[2]
+
+                    self.get_logger().info(f"CAMERA FRAME 3D: {camera_frame_3d}")
+
+                    x_b = -camera_frame_3d[1] + 0.13
+                    y_b = -camera_frame_3d[0]
+                    z_b = -camera_frame_3d[2] + 0.05
 
                     x_world = self.actual_position.x + (x_b * np.cos(self.actual_position.heading) - y_b * np.sin(self.actual_position.heading))
-                    y_world = self.actual_position.y + (x_b * np.sin(self.actual_position.heading) + y_b * np.cos(self.actual_position.heading))
-                    z_world = self.actual_position.z + z_b
+                    y_world = self.actual_position.y - (x_b * np.sin(self.actual_position.heading) + y_b * np.cos(self.actual_position.heading))
+                    z_world = self.actual_position.z - z_b
                     point_3d = (x_world, y_world, z_world)
 
-                    aux =  arr[0:valid_pos] - np.array(point_3d)
-                    aux = aux**2
-                    mask = aux < self.cluster_thresholds
-                    if mask.any():
-                        arr[mask] = (arr[mask] + aux[mask])/2
-                    else:
-                        arr[valid_pos] = point_3d
-                        valid_pos += 1
-                    
-                    bases = PoseArray()
-                    for i in range(valid_pos):
-                        p = Pose()
-                        p.position.x = float(arr[i][0])
-                        p.position.y = float(arr[i][1])
-                        p.position.z = float(arr[i][2])
-                        bases.poses.append(p)
-                    self.base_publisher.publish(bases)
+                    # Define limite de 1 metro (para XY apenas)
+                    distance_threshold_xy = 1.0  
 
+                    # Calcula distância XY (ignorando Z)
+                    distances_xy = np.linalg.norm(self.arr[:self.valid_pos, :2] - np.array(point_3d)[:2], axis=1)
+                    min_dist_xy = np.min(distances_xy)
+                    idx = np.argmin(distances_xy)
+
+                    if min_dist_xy < distance_threshold_xy:
+                        # Mesma base → média exponencial
+                        self.arr[idx] = 0.8 * self.arr[idx] + 0.2 * np.array(point_3d)
+                    else:
+                        # Nova base
+                        self.arr[self.valid_pos] = point_3d
+                        self.valid_pos += 1
+
+                    bases = PoseArray()
+                    bases.header.stamp = self.get_clock().now().to_msg()
+                    bases.header.frame_id = "map"
+                    for i in range(self.valid_pos):
+                        pose = Pose()
+                        pose.position.x = float(self.arr[i][0])
+                        pose.position.y = float(self.arr[i][1])
+                        pose.position.z = float(self.arr[i][2])
+                        pose.orientation.w = 1.0  # orientação neutra
+                        bases.poses.append(pose)
+
+                    self.base_publisher.publish(bases)                    
+                                        
                 self.get_logger().info(f"Detected 3D Point: {point_3d}")
             
-
-
         # inferred_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
 
     def get_points_to_3d(self, x, y, depth):
