@@ -27,7 +27,10 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'base_detection = base_detection.base_detection:main'
+            'base_detection = base_detection.base_detection:main',
+            'px4_gesture_test = base_detection.px4_gesture_test:main',
+            'mission_control = base_detection.mission_control:main',
+            'gt_odometry = base_detection.gt_odometry:main',
         ],
     },
 )

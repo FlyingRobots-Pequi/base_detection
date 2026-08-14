@@ -73,6 +73,35 @@ class ImageInferencer(Node):
         self.base_publisher = self.create_publisher(PoseArray, "/base_detection/bases", 10)
         self.debug_image_publisher = self.create_publisher(Image, "/base_detection/debug_image", 10)
 
+        # Erro de pixel NORMALIZADO ((u-cx)/fx, (v-cy)/fy) da deteccao mais
+        # proxima do centro da imagem, no frame camera_down_optical_frame.
+        # E o sinal de realimentacao do servo visual da missao (fase ALIGN):
+        # levar esse erro a zero poe o drone no nadir da base, o que tambem
+        # zera o vies de paralaxe das bases elevadas.
+        self.pixel_error_publisher = self.create_publisher(
+            PointStamped, "/base_detection/target_pixel_error", 10
+        )
+
+        # Portao de nadir, em METROS de afastamento no chao (nao em angulo):
+        # so entra no mapa deteccao cujo ponto projetado esteja a menos disto
+        # do ponto sob o drone. Motivo do portao: base ELEVADA vista de
+        # esguelha entra deslocada ~h*tan(theta) e a media exponencial
+        # mistura/duplica bases vizinhas.
+        # Ja foi um limiar ANGULAR fixo, que na pratica muda de tamanho com a
+        # altura: varrendo a 1.5 m ele so aceitava base quase exatamente sob o
+        # drone e a varredura inteira mapeou ZERO bases. Em metros o criterio
+        # independe da altitude de voo.
+        self.declare_parameter("nadir_gate_m", 1.0)
+        self.nadir_gate_m = self.get_parameter("nadir_gate_m").value
+
+        # A missao publica aqui a altura REAL da base apos pousar nela
+        # (x,y = qual base; z = altura medida no toque, VehicleLocalPosition).
+        # Corrige o Z=0 assumido pela projecao no plano do chao.
+        self.height_update_sub = self.create_subscription(
+            PointStamped, "/base_detection/base_height_update",
+            self.base_height_update_callback, 10,
+        )
+
         # Subscription for vehicle local position
         qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -211,6 +240,24 @@ class ImageInferencer(Node):
 
         self.drone_position_publisher.publish(marker_array)
 
+    def base_height_update_callback(self, msg: PointStamped):
+        """Sobrescreve o Z da base mais proxima de (x,y) com a altura medida.
+
+        Publicado pela missao apos confirmar o pouso: no toque, a altitude do
+        drone (VehicleLocalPosition) E a altura da base -- dado que a projecao
+        por plano Z=0 nao tem como estimar para bases elevadas.
+        """
+        if self.valid_pos == 0:
+            return
+        xy = np.array([msg.point.x, msg.point.y])
+        distances = np.linalg.norm(self.arr[:self.valid_pos, :2] - xy, axis=1)
+        idx = int(np.argmin(distances))
+        if distances[idx] < self.cluster_thresholds:
+            self.arr[idx][2] = msg.point.z
+            self.get_logger().info(
+                f"Base {idx}: altura corrigida para {msg.point.z:.2f} m (pouso)"
+            )
+
     def _inferenzzia(self, color_data):
         """Callback to process an image, run inference, and publish results."""
         img = self.bridge.imgmsg_to_cv2(color_data, desired_encoding="bgr8")
@@ -277,6 +324,30 @@ class ImageInferencer(Node):
 
         # get 3d points coordinates via ground-plane intersection (no depth sensor)
         if frame_detections and self.camera_intrinsics is not None:
+            fx = self.camera_intrinsics['fx']
+            fy = self.camera_intrinsics['fy']
+            cx = self.camera_intrinsics['cx']
+            cy = self.camera_intrinsics['cy']
+
+            # Servo visual: publica o erro normalizado da deteccao mais
+            # central. Norma pequena == drone praticamente no nadir da base.
+            best_error = None
+            for detection in frame_detections:
+                u = (detection[0] + detection[2]) / 2
+                v = (detection[1] + detection[3]) / 2
+                err = ((u - cx) / fx, (v - cy) / fy)
+                norm = float(np.hypot(err[0], err[1]))
+                if best_error is None or norm < best_error[2]:
+                    best_error = (err[0], err[1], norm)
+
+            error_msg = PointStamped()
+            error_msg.header.stamp = color_data.header.stamp
+            error_msg.header.frame_id = "camera_down_optical_frame"
+            error_msg.point.x = best_error[0]
+            error_msg.point.y = best_error[1]
+            error_msg.point.z = best_error[2]  # norma, p/ threshold no consumidor
+            self.pixel_error_publisher.publish(error_msg)
+
             for detection in frame_detections:
                 u = int((detection[0] + detection[2]) / 2)
                 v = int((detection[1] + detection[3]) / 2)
@@ -284,6 +355,16 @@ class ImageInferencer(Node):
                 point_3d = self.get_points_to_3d(u, v)
                 if point_3d is None:
                     continue
+
+                # Portao de nadir em metros: descarta do MAPA a deteccao cujo
+                # ponto no chao esteja longe da vertical do drone (o servo
+                # visual segue usando todas, pelo topico de erro de pixel).
+                nadir = self.nadir_point()
+                if nadir is not None:
+                    offset = float(np.hypot(point_3d[0] - nadir[0],
+                                            point_3d[1] - nadir[1]))
+                    if offset > self.nadir_gate_m:
+                        continue
 
                 if self.valid_pos == 0:
                     self.get_logger().info(f"Base Position in World Frame: X: {point_3d[0]:.3f}m, Y: {point_3d[1]:.3f}m, Z: {point_3d[2]:.3f}m")
@@ -324,6 +405,16 @@ class ImageInferencer(Node):
         debug_image_msg = self.bridge.cv2_to_imgmsg(result, encoding="bgr8")
         debug_image_msg.header = color_data.header
         self.debug_image_publisher.publish(debug_image_msg)
+
+    def nadir_point(self):
+        """(x, y) do ponto sob o drone no frame "map", ou None sem TF."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                "map", "camera_down_optical_frame", Time())
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException):
+            return None
+        return (tf.transform.translation.x, tf.transform.translation.y)
 
     def get_points_to_3d(self, u, v):
         """Back-projects a down-camera pixel onto the ground plane (Z=0 in "map"), no depth sensor.
